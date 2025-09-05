@@ -13,7 +13,7 @@ def pred_class(
 ):
     # เลือกอุปกรณ์อัตโนมัติ (รองรับ MPS บน Mac)
     if torch.backends.mps.is_available():
-        device = torch.device("mps")
+        device = torch.device("mps") 
     elif torch.cuda.is_available():
         device = torch.device("cuda")
     else:

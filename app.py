@@ -4,6 +4,7 @@ import torch
 from PIL import Image
 from prediction import pred_class
 import os
+
 # ---------------- UI ตามที่ต้องการ ----------------
 st.set_page_config(
     page_title="MRI-Based Classification of Alzheimer's Disease Severity",
