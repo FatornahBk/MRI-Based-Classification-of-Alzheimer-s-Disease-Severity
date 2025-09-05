@@ -1,6 +1,8 @@
-streamlit==1.38.0
-torch>=2.2.0
-torchvision>=0.17.0
-timm>=1.0.3
-pillow>=10.2.0
-numpy>=1.26.4 
+streamlit>=1.37
+torch>=2.4
+torchvision>=0.19
+timm>=1.0.7
+pillow
+numpy
+# ถ้าเช็คพอยต์เคยเซฟผ่าน lightning/fabric:
+lightning>=2.4

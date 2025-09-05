@@ -1,135 +1,228 @@
 # app.py
-import streamlit as st
-import torch
-from PIL import Image
-from prediction import pred_class
 import os
+import io
+import urllib.request
+import importlib
+from collections import OrderedDict
 
-# ---------------- UI ตามที่ต้องการ ----------------
-st.set_page_config(
-    page_title="MRI-Based Classification of Alzheimer's Disease Severity",
-    layout="centered",
-)
-st.title("MRI-Based Classification of Alzheimer Disease Severity")
-st.header("Please up load picture")
+import streamlit as st
+from PIL import Image
+import torch
+import torch.nn.functional as F
+import torchvision.transforms as T
+from timm import create_model
 
-# ---------------- ปรับค่าที่นี่ให้ตรงกับโมเดล ----------------
-CKPT_PATH = "efficientnet_b7_checkpoint_fold1.pt"   # ชื่อไฟล์เช็กพอยต์ของคุณ
-MODEL_NAME = "tf_efficientnet_b7_ns"                # ถ้าเทรนด้วย efficientnet_b7 ให้เปลี่ยนเป็น "efficientnet_b7"
 
-# รายชื่อคลาส (ตามงานของคุณ)
-CLASS_NAMES = ['Mild Impairment', 'Moderate Impairment', 'No Impairment', 'Very Mild Impairment']
-NUM_CLASSES = len(CLASS_NAMES)
+# =========================
+# Configs
+# =========================
+st.set_page_config(page_title="MRI-based Classification (EfficientNet-B7)", layout="centered")
 
-# ---------------- ตัวช่วย: ดึง state_dict จาก checkpoint ----------------
-def _extract_state_dict(ckpt_obj):
-    # 1) ถ้าเป็น dict ที่มี state_dict ซ้อนอยู่
-    if isinstance(ckpt_obj, dict):
-        for k in ["state_dict", "model_state_dict", "weights", "net", "model"]:
-            if k in ckpt_obj and isinstance(ckpt_obj[k], dict):
-                return ckpt_obj[k]
-        # 2) ถ้าเป็น dict ที่เป็น state_dict ตรงๆ
-        if any(isinstance(v, torch.Tensor) for v in ckpt_obj.values()):
-            return ckpt_obj
-    # 3) ถ้าเป็นวัตถุโมเดลทั้งตัว
-    if hasattr(ckpt_obj, "state_dict"):
-        return ckpt_obj.state_dict()
-    return None
+MODEL_URL  = "https://huggingface.co/your-org/weights/resolve/main/efficientnet_b7_state_dict.pt"
+WEIGHTS_DIR = "weights"
+CKPT_PATH  = os.path.join(WEIGHTS_DIR, "efficientnet_b7_state_dict.pt")
+
+CLASSES_TXT = "classes.txt"   # หนึ่งคลาสต่อหนึ่งบรรทัด
+IMAGE_SIZE  = 600             # tf_efficientnet_b7_ns ใช้ 600x600
+DEVICE      = "cpu"           # ใช้ CPU บน Streamlit Cloud
+
+
+# =========================
+# Utils
+# =========================
+def ensure_weights_exist():
+    """ดาวน์โหลดไฟล์โมเดล ถ้าไม่มี หรือขนาดเล็กผิดปกติ (เช่นเป็น LFS pointer)"""
+    os.makedirs(WEIGHTS_DIR, exist_ok=True)
+    if (not os.path.exists(CKPT_PATH)) or (os.path.getsize(CKPT_PATH) < 10_000):
+        st.write("⬇️ Downloading model weights...")
+        urllib.request.urlretrieve(MODEL_URL, CKPT_PATH)
+    # กันไฟล์ที่โหลดมาไม่ครบ
+    if os.path.getsize(CKPT_PATH) < 10_000:
+        raise RuntimeError("Downloaded weight file looks invalid (too small). Check MODEL_URL or hosting permissions.")
+
+
+def _torch_supports_weights_only() -> bool:
+    import inspect
+    return "weights_only" in inspect.signature(torch.load).parameters
+
+
+def _allow_safe_globals():
+    """อนุญาต safe globals สำหรับเช็คพอยต์ที่เซฟจาก Lightning/Fabric"""
+    try:
+        from torch.serialization import add_safe_globals
+    except Exception:
+        return
+    safe = []
+    try:
+        mod = importlib.import_module("lightning.fabric.wrappers")
+        if hasattr(mod, "_FabricModule"):
+            safe.append(getattr(mod, "_FabricModule"))
+    except Exception:
+        pass
+    try:
+        mod = importlib.import_module("pytorch_lightning.core.module")
+        if hasattr(mod, "LightningModule"):
+            safe.append(getattr(mod, "LightningModule"))
+    except Exception:
+        pass
+    if safe:
+        try:
+            add_safe_globals(safe)
+        except Exception:
+            pass
+
 
 def _load_checkpoint_safely(path: str):
     """
-    ลองโหลดหลายวิธีเพื่อให้รอดจาก PyTorch 2.6:
-      A) weights_only=True (ปลอดภัยสุด)
-      B) weights_only=True + allowlist Lightning (ถ้ามี)
-      C) fallback weights_only=False (เฉพาะไฟล์ที่ไว้ใจ)
+    พยายามโหลดเช็คพอยต์อย่างปลอดภัยและคืนค่า state_dict
+    Strategy:
+      1) weights_only=True (ถ้าได้)
+      2) allow safe globals แล้ว torch.load ปกติ → ดึง state_dict จากคีย์ยอดนิยม
+      3) ถ้าเป็นอ็อบเจ็กต์โมเดล → ดึง .state_dict()
     """
-    # A) ปลอดภัยสุด
-    try:
-        ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        sd = _extract_state_dict(ckpt)
-        if sd is not None:
-            return sd, "weights_only"
-    except Exception:
-        pass
-
-    # B) allowlist Lightning (ถ้ามี)
-    try:
-        from torch.serialization import safe_globals
+    # 1) weights_only=True (ถ้ามีในเวอร์ชัน PyTorch)
+    if _torch_supports_weights_only():
         try:
-            import lightning.fabric.wrappers as lfw
-            allow = [lfw._FabricModule]
+            obj = torch.load(path, map_location="cpu", weights_only=True)
+            if isinstance(obj, dict) and any(k in obj for k in ("state_dict", "model", "net", "weights")):
+                for k in ("state_dict", "model", "net", "weights"):
+                    if k in obj and isinstance(obj[k], dict):
+                        return obj[k], "weights_only:" + k
+            if isinstance(obj, dict):
+                return obj, "weights_only:raw_dict"
         except Exception:
-            allow = []
-        if allow:
-            with safe_globals(allow):
-                ckpt = torch.load(path, map_location="cpu", weights_only=True)
-            sd = _extract_state_dict(ckpt)
-            if sd is not None:
-                return sd, "weights_only+allowlist"
-    except Exception:
-        pass
+            pass
 
-    # C) fallback (เฉพาะไฟล์ที่เชื่อถือได้จริง)
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    sd = _extract_state_dict(ckpt)
+    # 2) allow safe globals แล้วโหลดแบบปกติ
+    _allow_safe_globals()
+    try:
+        obj = torch.load(path, map_location="cpu")
+        if isinstance(obj, dict):
+            if "state_dict" in obj and isinstance(obj["state_dict"], dict):
+                return obj["state_dict"], "pickle:state_dict"
+            for k in ("model", "net", "weights"):
+                if k in obj and isinstance(obj[k], dict):
+                    return obj[k], f"pickle:{k}"
+            # บางกรณีเป็น dict ของพารามิเตอร์ตรง ๆ
+            return obj, "pickle:raw_dict"
+        if hasattr(obj, "state_dict"):
+            return obj.state_dict(), "object.state_dict"
+    except ModuleNotFoundError as e:
+        st.error(f"Missing dependency while unpickling checkpoint: {e}. "
+                 f"Add the missing package to requirements.txt or re-save as pure state_dict.")
+        raise
+    return None, "failed"
+
+
+def _fix_state_dict_keys(sd: dict):
+    """ลบ prefix ที่พบบ่อย ('module.', 'model.') ออกจากคีย์ของ state_dict"""
+    new_sd = OrderedDict()
+    for k, v in sd.items():
+        nk = k
+        if nk.startswith("module."):
+            nk = nk[len("module."):]
+        if nk.startswith("model."):
+            nk = nk[len("model."):]
+        new_sd[nk] = v
+    return new_sd
+
+
+def load_classes():
+    if os.path.exists(CLASSES_TXT):
+        with open(CLASSES_TXT, "r", encoding="utf-8") as f:
+            classes = [line.strip() for line in f if line.strip()]
+        if classes:
+            return classes
+    # fallback
+    return [f"Class {i}" for i in range(2)]  # ปรับตามงานจริงของคุณ
+
+
+# =========================
+# Model loader (cached)
+# =========================
+@st.cache_resource(show_spinner=True)
+def get_model_and_classes():
+    ensure_weights_exist()
+
+    # 1) สร้างสถาปัตยกรรม (num_classes อิงจาก classes.txt)
+    classes = load_classes()
+    num_classes = len(classes)
+
+    # tf_efficientnet_b7_ns = EfficientNet-B7 (Noisy Student)
+    model = create_model("tf_efficientnet_b7_ns", pretrained=False, num_classes=num_classes)
+    model.to(DEVICE)
+
+    # 2) โหลดเช็คพอยต์แบบปลอดภัย → state_dict
+    sd, how = _load_checkpoint_safely(CKPT_PATH)
     if sd is None:
-        raise RuntimeError("Cannot extract state_dict from the checkpoint.")
-    return sd, "unsafe"
+        raise RuntimeError("Cannot load checkpoint safely. Consider re-saving as pure state_dict (only weights).")
 
-# ---------------- โหลดโมเดล (แคช) ----------------
-@st.cache_resource(show_spinner=False)
-def load_model():
-    if not os.path.exists(CKPT_PATH):
-        st.error(f"Checkpoint not found: {CKPT_PATH}")
-        st.stop()
+    sd = _fix_state_dict_keys(sd)
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available()
-        else ("mps" if torch.backends.mps.is_available() else "cpu")
+    # 3) โหลดพารามิเตอร์ (allow missing/unexpected สำหรับความเข้ากันได้)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    if missing:
+        st.warning(f"Missing keys in state_dict: {list(missing)[:5]}{'...' if len(missing)>5 else ''}")
+    if unexpected:
+        st.warning(f"Unexpected keys in state_dict: {list(unexpected)[:5]}{'...' if len(unexpected)>5 else ''}")
+
+    model.eval()
+    return model, classes
+
+
+# =========================
+# Preprocessing & Inference
+# =========================
+def get_transform():
+    return T.Compose([
+        T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        T.ToTensor(),
+        # EfficientNet expects float32 in [0,1]; timm model has own norm inside in many cases,
+        # แต่ถ้าต้อง normalize เอง ใช้ mean/std ของ ImageNet:
+        T.Normalize(mean=(0.485, 0.456, 0.406),
+                    std=(0.229, 0.224, 0.225)),
+    ])
+
+@torch.inference_mode()
+def predict_image(model, classes, image: Image.Image, topk=3):
+    tfm = get_transform()
+    x = tfm(image.convert("RGB")).unsqueeze(0).to(DEVICE)  # (1,3,H,W)
+    logits = model(x)
+    probs = F.softmax(logits, dim=1).cpu().numpy()[0]
+    top_idx = probs.argsort()[::-1][:topk]
+    return [(classes[i], float(probs[i])) for i in top_idx]
+
+
+# =========================
+# Streamlit UI
+# =========================
+st.title("🧠 MRI-based Classification (EfficientNet-B7)")
+
+with st.expander("ℹ️ Notes", expanded=False):
+    st.markdown(
+        "- โมเดลจะถูกดาวน์โหลดอัตโนมัติจาก URL ที่กำหนด (กันปัญหา LFS pointer บน GitHub)\n"
+        "- ถ้าโหลดเช็คพอยต์ไม่ผ่าน ให้ตรวจ `requirements.txt` ว่ามีแพ็กเกจที่จำเป็นครบ เช่น `timm`, `torch`, `lightning` (ถ้าเคยใช้)\n"
+        "- ถ้ามาจาก Lightning/Fabric การโหลดจะ allowlist คลาสที่จำเป็นชั่วคราวให้"
     )
 
-    # สร้างสถาปัตยกรรม EfficientNet-B7 จาก timm ให้ตรงกับตอนเทรน
-    import timm
-    model = timm.create_model(MODEL_NAME, pretrained=False, num_classes=NUM_CLASSES)
+# โหลดโมเดล (cached)
+try:
+    model, classes = get_model_and_classes()
+    st.success(f"Model loaded. Classes = {len(classes)}")
+except Exception as e:
+    st.error(f"Failed to load model: {e}")
+    st.stop()
 
-    # โหลดเฉพาะน้ำหนัก
-    state_dict, how = _load_checkpoint_safely(CKPT_PATH)
+uploaded = st.file_uploader("อัปโหลดภาพ (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
-    # ลบ prefix 'module.' จาก DataParallel ถ้ามี
-    clean_state = {}
-    for k, v in state_dict.items():
-        nk = k[7:] if k.startswith("module.") else k
-        clean_state[nk] = v
+if uploaded:
+    img = Image.open(io.BytesIO(uploaded.read()))
+    st.image(img, caption="Input image", use_container_width=True)
 
-    # ใส่น้ำหนัก (strict=False กันเคสหัว classifier ชื่อไม่ตรง)
-    missing, unexpected = model.load_state_dict(clean_state, strict=False)
-    if missing or unexpected:
-        st.info(f"load_state_dict(strict=False): missing={len(missing)}, unexpected={len(unexpected)}  [{how}]")
-
-    model.to(device).eval()
-    return model
-
-model = load_model()
-
-# ---------------- อัปโหลด → แสดงรูป → ปุ่มทำนาย → แสดงผล ----------------
-uploaded_image = st.file_uploader('Choose an image', type=['jpg', 'jpeg', 'png'])
-
-if uploaded_image is not None:
-    image = Image.open(uploaded_image).convert('RGB')
-    st.image(image, caption='Uploaded Image', use_column_width=True)
-
-    if st.button('Prediction'):
-        top_idx, top_name, probs = pred_class(
-            model=model,
-            image=image,
-            class_names=CLASS_NAMES,
-            image_size=(224, 224),  # 224 เร็วขึ้น; ถ้าเทรนใหญ่กว่านี้ปรับได้
-        )
-
-        st.write("## Prediction Result")
-        for i, name in enumerate(CLASS_NAMES):
-            color = "blue" if i == top_idx else "inherit"
-            st.write(
-                f"## <span style='color:{color}'>{name} : {probs[i]*100:.2f}%</span>",
-                unsafe_allow_html=True
-            )
+    with st.spinner("Predicting..."):
+        results = predict_image(model, classes, img, topk=min(3, len(classes)))
+    st.subheader("ผลการทำนาย")
+    for label, prob in results:
+        st.write(f"- **{label}** : {prob:.4f}")
+else:
+    st.info("อัปโหลดภาพเพื่อเริ่มทำนาย")
