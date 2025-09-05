@@ -6,3 +6,4 @@ pillow
 numpy
 # ถ้าเช็คพอยต์เคยเซฟผ่าน lightning/fabric:
 lightning>=2.4
+huggingface_hub>=0.23
