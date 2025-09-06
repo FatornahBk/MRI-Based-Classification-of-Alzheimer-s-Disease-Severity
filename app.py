@@ -39,10 +39,9 @@ def _get_secret_env(key, default=None):
         return st.secrets[key]
     return os.getenv(key, default)
 
-HF_REPO_ID   = _get_secret_env("HF_REPO_ID",   "")   # e.g. "FatornahBk/ad-severity-weights"
-HF_FILENAME  = _get_secret_env("HF_FILENAME",  "")   # e.g. "efficientnet_b7_state_dict.pt"
-HF_REPO_TYPE = _get_secret_env("HF_REPO_TYPE", "model")  # or "dataset"
-HF_TOKEN     = _get_secret_env("HF_TOKEN",     None)
+HF_REPO_ID   = _get_secret_env("MRI-Based-Classification-of-Alzheimer-s-Disease-Severity")   # e.g. "FatornahBk/ad-severity-weights"
+HF_FILENAME  = _get_secret_env("efficientnet_b7_state_dict.pt")
+HF_REPO_TYPE = _get_secret_env("model")  # or "dataset"
 
 # ถ้าไม่ใช้ HF ให้ตั้ง MODEL_URL เป็นลิงก์ไฟล์ตรง (public)
 MODEL_URL    = _get_secret_env("MODEL_URL",    "")   # e.g. "https://.../efficientnet_b7_state_dict.pt"
