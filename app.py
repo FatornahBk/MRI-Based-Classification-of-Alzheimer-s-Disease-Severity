@@ -10,29 +10,49 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
 from timm import create_model
-from huggingface_hub import hf_hub_download
+
+# ----- (Optional) ใช้ HF ถ้าตั้งค่าไว้ -----
+try:
+    from huggingface_hub import hf_hub_download
+    _HAS_HF = True
+except Exception:
+    _HAS_HF = False
 
 
 # =========================
-# Page / Constants
+# Page / Defaults
 # =========================
 st.set_page_config(page_title="MRI-based Classification (EfficientNet-B7)", layout="centered")
 
-# <<< ปรับค่าให้ตรงของคุณ >>>
-# ถ้าอัปโหลดไฟล์ที่ "แปลงเป็น state_dict แล้ว" แนะนำตั้งชื่อเป็น *_state_dict.pt
-HF_REPO_ID   = "your-org/weights"              # เช่น "FatornahBk/ad-severity-weights"
-HF_FILENAME  = "efficientnet_b7_state_dict.pt" # หรือ "efficientnet_b7_checkpoint_fold1.pt"
-HF_REPO_TYPE = "model"                         # หรือ "dataset" ถ้าเก็บเป็น dataset
-DEVICE       = "cpu"
-IMAGE_SIZE   = 600
-CLASSES_TXT  = "classes.txt"
-
-WEIGHTS_DIR  = "weights"
+DEVICE      = "cpu"
+IMAGE_SIZE  = 600
+CLASSES_TXT = "classes.txt"
+WEIGHTS_DIR = "weights"
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
+
+# =========================
+# Read Secrets/ENV (แก้ที่ Secrets จะไม่ต้องแก้โค้ด)
+# =========================
+def _get_secret_env(key, default=None):
+    # ลองดึงจาก Streamlit Secrets ก่อน → ไม่มีก็ไป ENV
+    if key in st.secrets:
+        return st.secrets[key]
+    return os.getenv(key, default)
+
+HF_REPO_ID   = _get_secret_env("HF_REPO_ID",   "")   # e.g. "FatornahBk/ad-severity-weights"
+HF_FILENAME  = _get_secret_env("HF_FILENAME",  "")   # e.g. "efficientnet_b7_state_dict.pt"
+HF_REPO_TYPE = _get_secret_env("HF_REPO_TYPE", "model")  # or "dataset"
+HF_TOKEN     = _get_secret_env("HF_TOKEN",     None)
+
+# ถ้าไม่ใช้ HF ให้ตั้ง MODEL_URL เป็นลิงก์ไฟล์ตรง (public)
+MODEL_URL    = _get_secret_env("MODEL_URL",    "")   # e.g. "https://.../efficientnet_b7_state_dict.pt"
+
+# พาธไฟล์ในเครื่อง (ตั้งตาม HF_FILENAME หรือชื่อที่ดึงจาก URL)
+CKPT_LOCAL   = os.path.join(WEIGHTS_DIR, HF_FILENAME or os.path.basename(MODEL_URL) or "model.pt")
 
 
 # =========================
-# Helper: read classes
+# Utils
 # =========================
 def load_classes():
     if os.path.exists(CLASSES_TXT):
@@ -40,45 +60,60 @@ def load_classes():
             classes = [line.strip() for line in f if line.strip()]
         if classes:
             return classes
-    # Fallback ถ้าไม่มีไฟล์
-    return [f"Class {i}" for i in range(2)]
+    return [f"Class {i}" for i in range(2)]  # fallback
 
-
-# =========================
-# HF download with token
-# =========================
-def ensure_weights_exist():
-    """
-    ดาวน์โหลดไฟล์น้ำหนักจาก Hugging Face (รองรับ private ด้วย HF_TOKEN)
-    คืน path ไฟล์ที่ดาวน์โหลดมา (ในโฟลเดอร์ weights)
-    """
-    token = os.getenv("HF_TOKEN", None)
-    # ลองอ่านจาก Streamlit Secrets ด้วย (Manage App → Secrets)
-    if "HF_TOKEN" in st.secrets:
-        token = st.secrets["HF_TOKEN"]
-
-    local_path = hf_hub_download(
-        repo_id=HF_REPO_ID,
-        filename=HF_FILENAME,
-        repo_type=HF_REPO_TYPE,
+def _download_via_hf(repo_id, filename, repo_type, token) -> str:
+    if not _HAS_HF:
+        raise RuntimeError("huggingface_hub ยังไม่ได้ติดตั้งใน environment (เพิ่มใน requirements.txt).")
+    return hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type=repo_type,
         token=token,
         local_dir=WEIGHTS_DIR,
         local_dir_use_symlinks=False,
-        cache_dir=None,  # ให้ดึงลง local_dir ชัดเจน
+        cache_dir=None,
     )
 
-    # กันกรณีดาวน์โหลดได้ pointer เล็ก ๆ (ผิดปกติ)
+def _download_via_url(url, out_path):
+    import urllib.request
+    req = urllib.request.Request(url)
+    # ถ้าเป็น private แบบมี header token (กรณีพิเศษ)
+    if HF_TOKEN and "huggingface.co" in url:
+        req.add_header("Authorization", f"Bearer {HF_TOKEN}")
+    with urllib.request.urlopen(req) as resp, open(out_path, "wb") as f:
+        f.write(resp.read())
+    return out_path
+
+def ensure_weights_exist() -> str:
+    """
+    ดาวน์โหลดไฟล์น้ำหนัก 2 ทางเลือก:
+      1) Hugging Face: ตั้งค่า HF_REPO_ID + HF_FILENAME (รองรับ private ด้วย HF_TOKEN)
+      2) URL ตรง: ตั้ง MODEL_URL เป็นลิงก์ public (หรือใช้ Bearer ถ้าเป็น HF+token)
+    คืน path ไฟล์น้ำหนักในเครื่อง
+    """
+    # ใช้ Hugging Face ถ้าตั้งค่าไว้ครบ
+    if HF_REPO_ID and HF_FILENAME:
+        st.write("⬇️ Downloading weights from Hugging Face…")
+        local_path = _download_via_hf(HF_REPO_ID, HF_FILENAME, HF_REPO_TYPE, HF_TOKEN)
+    elif MODEL_URL:
+        st.write("⬇️ Downloading weights from direct URL…")
+        local_path = _download_via_url(MODEL_URL, CKPT_LOCAL)
+    else:
+        raise RuntimeError(
+            "ไม่ได้ตั้งค่าที่มาของน้ำหนักโมเดล\n"
+            "- ตั้ง Secrets/ENV: HF_REPO_ID + HF_FILENAME (และ HF_TOKEN ถ้า private) "
+            "หรือ\n- ตั้ง MODEL_URL เป็นลิงก์ไฟล์โดยตรง"
+        )
+
+    # กันกรณีได้ pointer/ไฟล์ไม่ครบ
     if not os.path.exists(local_path) or os.path.getsize(local_path) < 10_000:
         raise RuntimeError(
-            "Weight file looks invalid (too small). "
-            "Check HF repo/file permissions or use a state_dict file."
+            "Weight file ดูเหมือนไม่ถูกต้อง (ขนาดเล็กผิดปกติ). "
+            "ตรวจ repo/ไฟล์ และสิทธิ์การเข้าถึงอีกครั้ง"
         )
     return local_path
 
-
-# =========================
-# Safe checkpoint loading
-# =========================
 def _torch_supports_weights_only() -> bool:
     import inspect
     return "weights_only" in inspect.signature(torch.load).parameters
@@ -112,9 +147,9 @@ def _load_checkpoint_safely(path: str):
     """
     คืน (state_dict, how)
     Strategy:
-      1) torch.load(weights_only=True) ถ้าเวอร์ชันรองรับ
-      2) allow safe globals แล้ว torch.load ปกติ → ดึง state_dict จากคีย์ยอดนิยม
-      3) ถ้าได้เป็นอ็อบเจ็กต์ → ดึง .state_dict()
+      1) torch.load(weights_only=True) ถ้ารองรับ
+      2) allow safe globals → torch.load ปกติ → ดึง state_dict จากคีย์ยอดนิยม
+      3) ถ้าเป็นอ็อบเจ็กต์โมเดล → .state_dict()
     """
     # 1) weights_only
     if _torch_supports_weights_only():
@@ -138,14 +173,13 @@ def _load_checkpoint_safely(path: str):
             for k in ("model", "net", "weights"):
                 if k in obj and isinstance(obj[k], dict):
                     return obj[k], f"pickle:{k}"
-            # dict ของพารามิเตอร์ตรง ๆ
             return obj, "pickle:raw_dict"
         if hasattr(obj, "state_dict"):
             return obj.state_dict(), "object.state_dict"
     except ModuleNotFoundError as e:
         st.error(
             f"Missing dependency while unpickling checkpoint: {e}. "
-            "Add the missing package to requirements.txt or re-save as pure state_dict."
+            "เพิ่มแพ็กเกจที่หายไปใน requirements.txt หรือแปลงเป็น pure state_dict"
         )
         raise
     return None, "failed"
@@ -166,26 +200,25 @@ def _fix_state_dict_keys(sd: dict):
 # =========================
 @st.cache_resource(show_spinner=True)
 def get_model_and_classes():
-    # 1) โหลดไฟล์จาก HF
+    # 1) ดาวน์โหลดไฟล์น้ำหนัก
     ckpt_path = ensure_weights_exist()
 
     # 2) โหลดคลาส
     classes = load_classes()
     num_classes = len(classes)
 
-    # 3) สร้างโมเดล
+    # 3) สร้างโมเดล (EfficientNet-B7)
     model = create_model("tf_efficientnet_b7_ns", pretrained=False, num_classes=num_classes)
     model.to(DEVICE)
 
     # 4) โหลดเช็กพอยต์
     sd, how = _load_checkpoint_safely(ckpt_path)
     if sd is None:
-        raise RuntimeError(
-            "Cannot load checkpoint safely. Consider converting to pure state_dict on your dev machine."
-        )
+        raise RuntimeError("โหลดเช็กพอยต์ไม่สำเร็จ: แนะนำแปลงเป็น pure state_dict บนเครื่อง dev แล้วอัปโหลดใหม่")
 
     sd = _fix_state_dict_keys(sd)
 
+    # 5) ใส่พารามิเตอร์
     missing, unexpected = model.load_state_dict(sd, strict=False)
     if missing:
         st.warning(f"Missing keys: {list(missing)[:5]}{' ...' if len(missing)>5 else ''}")
@@ -221,14 +254,15 @@ def predict_image(model, classes, image: Image.Image, topk=3):
 # =========================
 st.title("🧠 MRI-based Classification (EfficientNet-B7)")
 
-with st.expander("ℹ️ Notes", expanded=False):
+with st.expander("ℹ️ Setup tips", expanded=False):
     st.markdown(
-        "- น้ำหนักโมเดลจะถูกดาวน์โหลดจาก Hugging Face (รองรับ private ผ่าน HF_TOKEN)\n"
-        "- ถ้าโหลดเช็กพอยต์ไม่ผ่าน ให้ตรวจ dependencies และพิจารณาแปลงเป็น **pure state_dict**\n"
-        "- โมเดลใช้ tf_efficientnet_b7_ns จาก timm"
+        "- ตั้ง Secrets/ENV อย่างน้อย 1 ทาง:\n"
+        "  - **HF_REPO_ID + HF_FILENAME** (+ HF_TOKEN ถ้า private) เพื่อโหลดจาก Hugging Face\n"
+        "  - หรือ **MODEL_URL** เป็นลิงก์ไฟล์โดยตรง (public)\n"
+        "- ถ้าเป็น private Hugging Face ใส่ `HF_TOKEN` ใน Secrets ด้วย\n"
+        "- แนะนำใช้ไฟล์ที่แปลงเป็น **pure state_dict** เพื่อเลี่ยง dependency แปลก ๆ"
     )
 
-# โหลดโมเดล (cached)
 try:
     model, classes = get_model_and_classes()
     st.success(f"Model loaded ✅ | Classes = {len(classes)}")
@@ -237,14 +271,13 @@ except Exception as e:
     st.stop()
 
 uploaded = st.file_uploader("อัปโหลดภาพ (JPG/PNG)", type=["jpg", "jpeg", "png"])
-
 if uploaded:
+    from PIL import Image
     img = Image.open(io.BytesIO(uploaded.read()))
     st.image(img, caption="Input image", use_container_width=True)
 
     with st.spinner("Predicting..."):
         results = predict_image(model, classes, img, topk=3)
-
     st.subheader("ผลการทำนาย")
     for label, prob in results:
         st.write(f"- **{label}** : {prob:.4f}")
