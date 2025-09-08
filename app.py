@@ -11,7 +11,11 @@ DEVICE = "cpu"
 IMAGE_SIZE = 600
 CLASSES_TXT = "classes.txt"
 WEIGHTS_DIR = "weights"
-WEIGHTS_FILE = "efficientnet_b7_fold1_state_dict.pt"   # ใช้ไฟล์ที่แปลงแล้ว
+WEIGHTS_FILE = "weights/efficientnet_b7_fold1_state_dict.pt"
+
+# ตอนโหลด (ตอนนี้ไม่ต้องใส่ weights_only=False แล้ว)
+sd = torch.load(WEIGHTS_FILE, map_location=DEVICE)  # 2.6 ดีฟอลต์ weights_only=True โอเค
+model.load_state_dict(sd, strict=False)   # ใช้ไฟล์ที่แปลงแล้ว
 MODEL_NAME = "tf_efficientnet_b7_ns (fold1)"
 
 # ลำดับที่ผู้ใช้ต้องการให้โชว์ผลลัพธ์ (เรียงคงที่)
@@ -64,7 +68,7 @@ def predict_full(model, img, class_names):
 
 # ---------------- UI ----------------
 st.set_page_config(page_title="MRI-based Classification (EfficientNet-B7)")
-st.title("EfficientNet-B7 — Streamlit Demo")
+st.title("MRI-Based Classification of Alzheimer's Disease Severity")
 st.caption(f"Model: **{MODEL_NAME}**")
 
 # โหลดชื่อคลาส + เช็คไฟล์น้ำหนัก
