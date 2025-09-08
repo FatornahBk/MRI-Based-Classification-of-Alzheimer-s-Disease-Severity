@@ -126,7 +126,3 @@ if st.session_state.dist:
 
     # สรุปคลาสที่น่าจะใช่มากที่สุด (Top-1)
     top_class = max(st.session_state.dist.items(), key=lambda kv: kv[1])
-    st.markdown(
-        f"\n**สรุป:** ภาพนี้มีความเป็นไปได้สูงสุดเป็นคลาส "
-        f"`{top_class[0]}` **({top_class[1]*100:.2f}%)**"
-    )
