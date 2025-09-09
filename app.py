@@ -179,7 +179,7 @@ if uploaded:
             render_progress_block(name, p * 100.0, is_top=(i == max_idx))
 
         # ====== Info Model/Device ======
-        st.write(f"**Model:** EfficientNet-B7 (timm) · **Device:** {DEVICE.UPPER()}")
+        st.write(f"**Model:** EfficientNet-B7 (timm) · **Device:** {DEVICE.upper()}")
 
         mismatches = [dn for dn in desired_norm if dn not in norm_map]
         if mismatches:
