@@ -13,10 +13,60 @@ from timm import create_model
 # =========================
 # Page / Defaults
 # =========================
-st.set_page_config(page_title="MRI-Based Classification of Alzheimer's Disease Severity", layout="centered")
+st.set_page_config(
+    page_title="MRI-Based Classification of Alzheimer's Disease Severity",
+    layout="centered",
+)
 
-DEVICE      = "cpu"
-IMAGE_SIZE  = 600
+# ---- Custom CSS for Dark Theme ----
+st.markdown(
+    """
+    <style>
+    body {
+        background-color: #111827;  /* Dark background */
+        color: #E5E7EB;  /* Light gray text */
+    }
+    .stApp {
+        background-color: #111827;
+        color: #E5E7EB;
+    }
+    .result-card {
+        background: #1F2937;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+    .result-title {
+        font-size: 2.2rem;
+        font-weight: 800;
+        margin-bottom: 1rem;
+        color: #FFFFFF;
+    }
+    .class-name {
+        font-size: 1.6rem;
+        font-weight: 600;
+        margin: 0.5rem 0;
+    }
+    .progress-container {
+        width: 100%;
+        background: #374151;
+        border-radius: 10px;
+        height: 18px;
+        overflow: hidden;
+        margin-top: 6px;
+    }
+    .progress-bar {
+        height: 100%;
+        border-radius: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+DEVICE = "cpu"
+IMAGE_SIZE = 600
 CLASSES_TXT = os.environ.get("CLASSES_TXT", "classes.txt")
 
 # ลำดับการ "แสดงผล"
@@ -28,7 +78,7 @@ DESIRED_ORDER = [
 ]
 
 # พาธไฟล์น้ำหนัก
-DEFAULT_WEIGHTS  = "weights/efficientnet_b7_fold1_state_dict.pt"
+DEFAULT_WEIGHTS = "weights/efficientnet_b7_fold1_state_dict.pt"
 FALLBACK_WEIGHTS = "efficientnet_b7_fold1_state_dict.pt"
 MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
 if not os.path.exists(MODEL_WEIGHTS):
@@ -60,7 +110,7 @@ def load_model(num_classes: int):
         pretrained=False,
         num_classes=num_classes,
         drop_rate=0.0,
-        drop_path_rate=0.0
+        drop_path_rate=0.0,
     )
     model.eval()
     model.to(DEVICE)
@@ -74,11 +124,15 @@ def load_model(num_classes: int):
 
     try:
         sd = torch.load(MODEL_WEIGHTS, map_location=DEVICE)
-        if isinstance(sd, dict) and "state_dict" in sd and all(not k.startswith("model.") for k in sd["state_dict"].keys()):
+        if isinstance(sd, dict) and "state_dict" in sd and all(
+            not k.startswith("model.") for k in sd["state_dict"].keys()
+        ):
             sd = sd["state_dict"]
         missing, unexpected = model.load_state_dict(sd, strict=False)
         if missing or unexpected:
-            st.info(f"Loaded with non-strict mode. Missing keys: {len(missing)} | Unexpected keys: {len(unexpected)}")
+            st.info(
+                f"Loaded with non-strict mode. Missing keys: {len(missing)} | Unexpected keys: {len(unexpected)}"
+            )
     except Exception as e:
         st.error(
             "Failed to load model weights. Make sure it's a plain state_dict compatible with timm EfficientNet-B7 head.\n\n"
@@ -87,12 +141,13 @@ def load_model(num_classes: int):
     return model
 
 def build_transform(size: int = IMAGE_SIZE):
-    return T.Compose([
-        T.Resize((size, size)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]),
-    ])
+    return T.Compose(
+        [
+            T.Resize((size, size)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
 
 def predict_image(model, img: Image.Image, classes):
     tfm = build_transform(IMAGE_SIZE)
@@ -107,26 +162,17 @@ def predict_image(model, img: Image.Image, classes):
 def render_progress_block(name: str, percent: float, is_top: bool):
     """
     แสดงชื่อคลาส + แถบเปอร์เซ็นต์ (progress bar) ใต้ชื่อ
-    - is_top=True จะเปลี่ยนสีชื่อและแถบเป็นสีน้ำเงิน
     """
     percent_clamped = max(0.0, min(100.0, percent))
-    color_bar   = "#2F6DF6" if is_top else "#9CA3AF"   # top = blue, others = gray-400
-    color_text  = "#2F6DF6" if is_top else "inherit"
-    weight_text = "900" if is_top else "700"
+    color_bar = "#2563EB" if is_top else "#6B7280"  # blue for top, gray for others
+    color_text = "#60A5FA" if is_top else "#E5E7EB"
 
     html = f"""
-    <div style="margin: 0.35rem 0 1rem 0;">
-      <div style="font-size:2.0rem; font-weight:{weight_text}; color:{color_text};">
+    <div class="class-name" style="color:{color_text};">
         {name} : {percent_clamped:.2f}%
-      </div>
-      <div style="width:100%; background:#E5E7EB; border-radius:10px; height:16px; overflow:hidden;">
-        <div style="
-            width:{percent_clamped}%;
-            height:100%;
-            background:{color_bar};
-            border-radius:10px;">
-        </div>
-      </div>
+    </div>
+    <div class="progress-container">
+        <div class="progress-bar" style="width:{percent_clamped}%; background:{color_bar};"></div>
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
@@ -134,11 +180,11 @@ def render_progress_block(name: str, percent: float, is_top: bool):
 # =========================
 # UI
 # =========================
-st.title("MRI-Based Classification of Alzheimer's Disease Severity")
-st.caption("อัปโหลดภาพ แล้วกด **Predict**")
+st.title("🧠 MRI-Based Classification of Alzheimer's Disease Severity")
+st.caption("อัปโหลดภาพ MRI แล้วกด **Predict** เพื่อดูผลการประเมินความรุนแรง")
 
 classes = load_classes()
-model   = load_model(num_classes=len(classes))
+model = load_model(num_classes=len(classes))
 
 norm_map = {_norm_name(name): name for name in classes}
 desired_norm = [_norm_name(s) for s in DESIRED_ORDER]
@@ -156,11 +202,9 @@ if uploaded:
         with st.spinner("Running inference..."):
             class_probs = predict_image(model, image, classes)
 
-        # ====== HEADER ======
-        st.markdown(
-            "<div style='font-size:2.2rem; font-weight:800; margin: 0.25rem 0 0.75rem 0;'>Prediction Result</div>",
-            unsafe_allow_html=True
-        )
+        # ====== HEADER CARD ======
+        st.markdown('<div class="result-card">', unsafe_allow_html=True)
+        st.markdown('<div class="result-title">Prediction Result</div>', unsafe_allow_html=True)
 
         # เตรียมข้อมูลเรียงตาม DESIRED_ORDER
         rows = []
@@ -174,18 +218,24 @@ if uploaded:
 
         max_idx = max(range(len(rows)), key=lambda i: rows[i][1]) if rows else -1
 
-        # ====== แสดงชื่อ + "แถบเปอร์เซ็นต์" ใต้ชื่อ (แทนกราฟภาพรวม) ======
+        # Render progress bars
         for i, (name, p) in enumerate(rows):
             render_progress_block(name, p * 100.0, is_top=(i == max_idx))
 
+        st.markdown("</div>", unsafe_allow_html=True)  # close result-card
+
         # ====== Info Model/Device ======
-        st.write(f"**Model:** EfficientNet-B7 (timm) · **Device:** {DEVICE.upper()}")
+        st.markdown(
+            f"<div style='margin-top:1rem; font-size:0.9rem; color:#9CA3AF;'>"
+            f"Model: EfficientNet-B7 (timm) · Device: {DEVICE.upper()}</div>",
+            unsafe_allow_html=True,
+        )
 
         mismatches = [dn for dn in desired_norm if dn not in norm_map]
         if mismatches:
             st.warning(
-                "บางชื่อที่ต้องการแสดง ไม่พบใน classes.txt โปรดตรวจสะกด/ตัวพิมพ์:\n- " +
-                "\n- ".join(mismatches)
+                "บางชื่อที่ต้องการแสดง ไม่พบใน classes.txt โปรดตรวจสะกด/ตัวพิมพ์:\n- "
+                + "\n- ".join(mismatches)
             )
 else:
     st.info("อัปโหลดภาพ แล้วกด Predict")
