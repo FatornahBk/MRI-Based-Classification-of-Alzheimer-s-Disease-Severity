@@ -77,33 +77,24 @@ st.markdown(
 )
 
 # =========================
-# Config (เปลี่ยนโมเดลได้ด้วย ENV)
+# Config (ตั้งให้ใช้ Inception v3 + weight ที่ระบุ)
 # =========================
-# โมเดลเริ่มต้นให้เบา เพื่อลดดีเลย์/โอกาสล่มตอนบูตบน Cloud
-MODEL_NAME = os.environ.get("MODEL_NAME", "efficientnet_b0").strip()
+MODEL_NAME = os.environ.get("MODEL_NAME", "inception_v3").strip()
 
-# ขนาดภาพที่เหมาะกับแต่ละโมเดล (แก้ได้ด้วย ENV IMAGE_SIZE ถ้าต้องการ)
 IMAGE_SIZE_MAP = {
-    "efficientnet_b0": 224,
-    "efficientnet_b1": 240,
-    "efficientnet_b2": 260,
-    "efficientnet_b3": 300,
-    "efficientnet_b4": 380,
-    "efficientnet_b5": 456,
-    "efficientnet_b6": 528,
-    "efficientnet_b7": 600,
-    "inception_v3": 299,
-    "resnet50": 224,
+    "efficientnet_b0": 224, "efficientnet_b1": 240, "efficientnet_b2": 260,
+    "efficientnet_b3": 300, "efficientnet_b4": 380, "efficientnet_b5": 456,
+    "efficientnet_b6": 528, "efficientnet_b7": 600,
+    "inception_v3": 299, "resnet50": 224,
 }
-IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", IMAGE_SIZE_MAP.get(MODEL_NAME, 224)))
+IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", IMAGE_SIZE_MAP.get(MODEL_NAME, 299)))
 
-DEVICE = os.environ.get("DEVICE", "cpu").lower()  # cpu (แนะนำบน Streamlit Cloud)
-
+DEVICE = os.environ.get("DEVICE", "cpu").lower()
 CLASSES_TXT = os.environ.get("CLASSES_TXT", "classes.txt")
 
-# ตั้ง default weights ตามชื่อโมเดลอัตโนมัติ (แก้ด้วย ENV MODEL_WEIGHTS ได้)
-DEFAULT_WEIGHTS  = f"weights/{MODEL_NAME}_state_dict.pt"
-FALLBACK_WEIGHTS = f"{MODEL_NAME}_state_dict.pt"
+# ใช้ไฟล์น้ำหนัก inception_v3_fold0_state_dict.pt ตามที่ขอ
+DEFAULT_WEIGHTS  = "weights/inception_v3_fold0_state_dict.pt"
+FALLBACK_WEIGHTS = "inception_v3_fold0_state_dict.pt"
 MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
 if not os.path.exists(MODEL_WEIGHTS) and os.path.exists(FALLBACK_WEIGHTS):
     MODEL_WEIGHTS = FALLBACK_WEIGHTS
@@ -116,7 +107,7 @@ DESIRED_ORDER = [
     "Very Mild Impairment",
 ]
 
-# (ทางเลือก) ลดการใช้ thread ของ Torch บนเครื่องเล็ก ๆ
+# ลดการใช้ thread ของ Torch บนเครื่องเล็ก ๆ
 try:
     torch.set_num_threads(max(1, int(os.environ.get("TORCH_NUM_THREADS", "1"))))
 except Exception:
@@ -130,9 +121,6 @@ def _norm_name(s: str) -> str:
 
 @st.cache_resource(show_spinner=False)
 def load_classes_safe():
-    """
-    เวอร์ชันปลอดภัย: ถ้าไม่มี/ว่าง -> ไม่ stop ให้ UI ขึ้นได้ก่อน
-    """
     path = CLASSES_TXT
     if not os.path.exists(path):
         st.warning(f"⚠️ classes.txt not found at: {path}. The UI is loaded but prediction is disabled.")
@@ -150,11 +138,9 @@ def load_classes_safe():
 
 @st.cache_resource(show_spinner=False)
 def load_model(num_classes: int):
-    """
-    Lazy import timm + โหลด weights แบบไม่ล้ม ถ้าไฟล์หายก็ใช้โมเดลเปล่า
-    """
+    """Lazy import timm + โหลด weights; ถ้าโหลดไม่ได้จะใช้หัวสุ่มแทน"""
     try:
-        from timm import create_model  # lazy import เพื่อลดดีเลย์ตอนบูต
+        from timm import create_model
         model = create_model(
             MODEL_NAME,
             pretrained=False,
@@ -168,7 +154,6 @@ def load_model(num_classes: int):
 
     model.eval().to(DEVICE)
 
-    # ถ้าไม่มีไฟล์น้ำหนัก ให้ใช้หัวแบบสุ่มไปก่อน (ไม่หยุดแอป)
     if not os.path.exists(MODEL_WEIGHTS):
         st.warning(
             f"Model weights not found at: {MODEL_WEIGHTS}\n"
@@ -178,7 +163,6 @@ def load_model(num_classes: int):
 
     try:
         sd = torch.load(MODEL_WEIGHTS, map_location=DEVICE)
-        # รองรับ checkpoint ที่เก็บในคีย์ 'state_dict'
         if isinstance(sd, dict) and "state_dict" in sd and all(
             not k.startswith("model.") for k in sd["state_dict"].keys()
         ):
@@ -194,7 +178,7 @@ def load_model(num_classes: int):
     return model
 
 def build_transform(size: int = IMAGE_SIZE):
-    # ใช้มาตรฐาน ImageNet; Inception/ENet ก็ดีฟอลต์นี้ได้
+    # Inception v3 ใช้ 299x299; normalize แบบ ImageNet
     return T.Compose([
         T.Resize((size, size)),
         T.ToTensor(),
@@ -211,11 +195,9 @@ def predict_image(model, img: Image.Image, classes):
     return OrderedDict((idx_to_class[i], float(p)) for i, p in enumerate(probs))
 
 def render_progress_block(name: str, percent: float, is_top: bool):
-    """แสดงชื่อคลาส + แถบเปอร์เซ็นต์ (progress bar) ใต้ชื่อ"""
     percent = max(0.0, min(100.0, percent))
-    color_bar  = "#2563EB" if is_top else "#6B7280"  # blue / gray
+    color_bar  = "#2563EB" if is_top else "#6B7280"
     color_text = "#60A5FA" if is_top else "#E5E7EB"
-
     st.markdown(
         f"""
         <div class="class-name" style="color:{color_text};">{name} : {percent:.2f}%</div>
@@ -232,7 +214,7 @@ def render_progress_block(name: str, percent: float, is_top: bool):
 st.title("🧠 MRI-Based Classification of Alzheimer's Disease Severity")
 st.caption("อัปโหลดภาพ MRI แล้วกด **Predict** เพื่อดูผลการประเมินความรุนแรง")
 
-classes = load_classes_safe()  # ไม่ stop ถ้าไม่มีไฟล์
+classes = load_classes_safe()
 norm_map = {_norm_name(name): name for name in classes} if classes else {}
 desired_norm = [_norm_name(s) for s in DESIRED_ORDER]
 
@@ -240,7 +222,6 @@ uploaded = st.file_uploader("อัปโหลดภาพ (JPG/PNG)", type=["j
 if uploaded:
     try:
         image = Image.open(io.BytesIO(uploaded.read()))
-        # รูปเล็กลง (เช่น 320px)
         st.image(image, caption="Input image", width=320)
     except Exception as e:
         st.error(f"Unable to open the image: {e}")
@@ -251,7 +232,7 @@ if uploaded:
             st.error("Cannot predict: classes.txt is missing or empty.")
         else:
             with st.spinner(f"Preparing model ({MODEL_NAME})..."):
-                model = load_model(num_classes=len(classes))  # โหลดตอนกดปุ่ม เพื่อลดดีเลย์บูต
+                model = load_model(num_classes=len(classes))
 
             with st.spinner("Running inference..."):
                 class_probs = predict_image(model, image, classes)
@@ -260,7 +241,6 @@ if uploaded:
             st.markdown('<div class="result-card">', unsafe_allow_html=True)
             st.markdown('<div class="result-title">Prediction Result</div>', unsafe_allow_html=True)
 
-            # Top-1 เพื่อโชว์บนการ์ด Predicted
             if class_probs:
                 top_name, top_prob = max(class_probs.items(), key=lambda kv: kv[1])
             else:
@@ -274,7 +254,6 @@ if uploaded:
                 unsafe_allow_html=True,
             )
 
-            # เตรียมข้อมูลแสดงตาม DESIRED_ORDER
             rows = []
             for want_norm in desired_norm:
                 if want_norm in norm_map:
@@ -284,22 +263,17 @@ if uploaded:
                     rows.append((f"[Missing in classes.txt] {want_norm}", 0.0))
 
             max_idx = max(range(len(rows)), key=lambda i: rows[i][1]) if rows else -1
-
-            # Progress bars ต่อคลาส
             for i, (name, p) in enumerate(rows):
                 render_progress_block(name, p * 100.0, is_top=(i == max_idx))
 
-            # ปิดการ์ด
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Info Model/Device
             st.markdown(
                 f"<div style='margin-top:1rem; font-size:0.9rem; color:#9CA3AF;'>"
                 f"Model: {MODEL_NAME} (timm) · ImageSize: {IMAGE_SIZE} · Device: {DEVICE.upper()}</div>",
                 unsafe_allow_html=True,
             )
 
-            # แจ้งเตือนชื่อไม่ตรงใน classes.txt
             mismatches = [dn for dn in desired_norm if dn not in norm_map]
             if mismatches:
                 st.warning(
