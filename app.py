@@ -40,11 +40,11 @@ st.markdown(
         letter-spacing:.3px;
     }
     .predicted-title{
-        font-size:2.4rem;
+        font-size:2.0rem;
         font-weight:800;
         color:#E5E7EB;
         text-align:center;
-        margin:.5rem 0 .75rem 0;
+        margin:.25rem 0 .5rem 0;
     }
     .pill-wrap{ text-align:center; margin-bottom:1rem; }
     .pill{
@@ -58,7 +58,7 @@ st.markdown(
         backdrop-filter:blur(3px);
     }
     .class-name{
-        font-size:1.6rem;
+        font-size:1.4rem;
         font-weight:600;
         margin:.5rem 0;
     }
@@ -66,7 +66,7 @@ st.markdown(
         width:100%;
         background:#374151;
         border-radius:10px;
-        height:18px;
+        height:16px;
         overflow:hidden;
         margin-top:6px;
     }
@@ -76,9 +76,37 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-DEVICE      = "cpu"
-IMAGE_SIZE  = 600
+# =========================
+# Config (เปลี่ยนโมเดลได้ด้วย ENV)
+# =========================
+# โมเดลเริ่มต้นให้เบา เพื่อลดดีเลย์/โอกาสล่มตอนบูตบน Cloud
+MODEL_NAME = os.environ.get("MODEL_NAME", "efficientnet_b0").strip()
+
+# ขนาดภาพที่เหมาะกับแต่ละโมเดล (แก้ได้ด้วย ENV IMAGE_SIZE ถ้าต้องการ)
+IMAGE_SIZE_MAP = {
+    "efficientnet_b0": 224,
+    "efficientnet_b1": 240,
+    "efficientnet_b2": 260,
+    "efficientnet_b3": 300,
+    "efficientnet_b4": 380,
+    "efficientnet_b5": 456,
+    "efficientnet_b6": 528,
+    "efficientnet_b7": 600,
+    "inception_v3": 299,
+    "resnet50": 224,
+}
+IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", IMAGE_SIZE_MAP.get(MODEL_NAME, 224)))
+
+DEVICE = os.environ.get("DEVICE", "cpu").lower()  # cpu (แนะนำบน Streamlit Cloud)
+
 CLASSES_TXT = os.environ.get("CLASSES_TXT", "classes.txt")
+
+# ตั้ง default weights ตามชื่อโมเดลอัตโนมัติ (แก้ด้วย ENV MODEL_WEIGHTS ได้)
+DEFAULT_WEIGHTS  = f"weights/{MODEL_NAME}_state_dict.pt"
+FALLBACK_WEIGHTS = f"{MODEL_NAME}_state_dict.pt"
+MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
+if not os.path.exists(MODEL_WEIGHTS) and os.path.exists(FALLBACK_WEIGHTS):
+    MODEL_WEIGHTS = FALLBACK_WEIGHTS
 
 # ลำดับการ "แสดงผล"
 DESIRED_ORDER = [
@@ -88,12 +116,11 @@ DESIRED_ORDER = [
     "Very Mild Impairment",
 ]
 
-# พาธไฟล์น้ำหนัก (ไม่มีก็รันต่อได้)
-DEFAULT_WEIGHTS  = "weights/efficientnet_b7_fold1_state_dict.pt"
-FALLBACK_WEIGHTS = "efficientnet_b7_fold1_state_dict.pt"
-MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
-if not os.path.exists(MODEL_WEIGHTS) and os.path.exists(FALLBACK_WEIGHTS):
-    MODEL_WEIGHTS = FALLBACK_WEIGHTS
+# (ทางเลือก) ลดการใช้ thread ของ Torch บนเครื่องเล็ก ๆ
+try:
+    torch.set_num_threads(max(1, int(os.environ.get("TORCH_NUM_THREADS", "1"))))
+except Exception:
+    pass
 
 # =========================
 # Helpers
@@ -126,15 +153,19 @@ def load_model(num_classes: int):
     """
     Lazy import timm + โหลด weights แบบไม่ล้ม ถ้าไฟล์หายก็ใช้โมเดลเปล่า
     """
-    from timm import create_model  # lazy import เพื่อลดดีเลย์ตอนบูต
+    try:
+        from timm import create_model  # lazy import เพื่อลดดีเลย์ตอนบูต
+        model = create_model(
+            MODEL_NAME,
+            pretrained=False,
+            num_classes=num_classes,
+            drop_rate=0.0,
+            drop_path_rate=0.0,
+        )
+    except Exception as e:
+        st.error(f"สร้างโมเดล '{MODEL_NAME}' ไม่สำเร็จ: {e}")
+        raise
 
-    model = create_model(
-        "efficientnet_b7",
-        pretrained=False,
-        num_classes=num_classes,
-        drop_rate=0.0,
-        drop_path_rate=0.0,
-    )
     model.eval().to(DEVICE)
 
     # ถ้าไม่มีไฟล์น้ำหนัก ให้ใช้หัวแบบสุ่มไปก่อน (ไม่หยุดแอป)
@@ -163,6 +194,7 @@ def load_model(num_classes: int):
     return model
 
 def build_transform(size: int = IMAGE_SIZE):
+    # ใช้มาตรฐาน ImageNet; Inception/ENet ก็ดีฟอลต์นี้ได้
     return T.Compose([
         T.Resize((size, size)),
         T.ToTensor(),
@@ -174,7 +206,7 @@ def predict_image(model, img: Image.Image, classes):
     x = tfm(img.convert("RGB")).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
         logits = model(x)
-        probs = F.softmax(logits, dim=1)[0].cpu().tolist()
+        probs = F.softmax(logits, dim=1)[0].detach().cpu().tolist()
     idx_to_class = {i: c for i, c in enumerate(classes)}
     return OrderedDict((idx_to_class[i], float(p)) for i, p in enumerate(probs))
 
@@ -208,8 +240,8 @@ uploaded = st.file_uploader("อัปโหลดภาพ (JPG/PNG)", type=["j
 if uploaded:
     try:
         image = Image.open(io.BytesIO(uploaded.read()))
-        # รูปเล็กลง (เช่น 360px)
-        st.image(image, caption="Input image", width=360)
+        # รูปเล็กลง (เช่น 320px)
+        st.image(image, caption="Input image", width=320)
     except Exception as e:
         st.error(f"Unable to open the image: {e}")
         st.stop()
@@ -218,7 +250,7 @@ if uploaded:
         if not classes:
             st.error("Cannot predict: classes.txt is missing or empty.")
         else:
-            with st.spinner("Preparing model..."):
+            with st.spinner(f"Preparing model ({MODEL_NAME})..."):
                 model = load_model(num_classes=len(classes))  # โหลดตอนกดปุ่ม เพื่อลดดีเลย์บูต
 
             with st.spinner("Running inference..."):
@@ -263,7 +295,7 @@ if uploaded:
             # Info Model/Device
             st.markdown(
                 f"<div style='margin-top:1rem; font-size:0.9rem; color:#9CA3AF;'>"
-                f"Model: EfficientNet-B7 (timm) · Device: {DEVICE.upper()}</div>",
+                f"Model: {MODEL_NAME} (timm) · ImageSize: {IMAGE_SIZE} · Device: {DEVICE.upper()}</div>",
                 unsafe_allow_html=True,
             )
 

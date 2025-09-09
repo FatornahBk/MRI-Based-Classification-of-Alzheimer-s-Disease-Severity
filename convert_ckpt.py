@@ -5,8 +5,8 @@
 import os, sys, types
 import torch
 
-SRC = "efficientnet_b7_checkpoint_fold1.pt"    # ไฟล์ต้นฉบับ
-DST = "efficientnet_b7_fold1_state_dict.pt"    # ไฟล์ผลลัพธ์ (state_dict)
+SRC = "inception_v3_checkpoint_fold0.pt"    # ไฟล์ต้นฉบับ
+DST = "inception_v3_fold0_state_dict.pt"    # ไฟล์ผลลัพธ์ (state_dict)
 
 def allowlist_classes():
     """อนุญาตคลาสที่มักอยู่ใน ckpt ของ timm + lightning สำหรับ weights_only=True"""
