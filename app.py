@@ -10,6 +10,9 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from timm import create_model
 
+# ==== NEW: matplotlib for bar chart ====
+import matplotlib.pyplot as plt
+
 # =========================
 # Page / Defaults
 # =========================
@@ -19,7 +22,7 @@ DEVICE      = "cpu"
 IMAGE_SIZE  = 600
 CLASSES_TXT = os.environ.get("CLASSES_TXT", "classes.txt")
 
-# ลำดับการ "แสดงผล" ตามที่ต้องการ (ไม่กระทบค่าจริงจากโมเดล)
+# ลำดับการ "แสดงผล"
 DESIRED_ORDER = [
     "Mild Impairment",
     "Moderate Impairment",
@@ -27,7 +30,7 @@ DESIRED_ORDER = [
     "Very Mild Impairment",
 ]
 
-# พาธไฟล์น้ำหนัก (ตั้ง ENV MODEL_WEIGHTS ได้)
+# พาธไฟล์น้ำหนัก
 DEFAULT_WEIGHTS  = "weights/efficientnet_b7_fold1_state_dict.pt"
 FALLBACK_WEIGHTS = "efficientnet_b7_fold1_state_dict.pt"
 MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
@@ -74,7 +77,6 @@ def load_model(num_classes: int):
 
     try:
         sd = torch.load(MODEL_WEIGHTS, map_location=DEVICE)
-        # รองรับกรณี pack เป็น {'state_dict': {...}}
         if isinstance(sd, dict) and "state_dict" in sd and all(not k.startswith("model.") for k in sd["state_dict"].keys()):
             sd = sd["state_dict"]
         missing, unexpected = model.load_state_dict(sd, strict=False)
@@ -101,14 +103,9 @@ def predict_image(model, img: Image.Image, classes):
     with torch.no_grad():
         logits = model(x)
         probs = F.softmax(logits, dim=1)[0].cpu().tolist()
-    # แม็ป index → ชื่อคลาสตาม classes.txt
     idx_to_class = {i: c for i, c in enumerate(classes)}
     class_to_prob = OrderedDict((idx_to_class[i], float(p)) for i, p in enumerate(probs))
-    # Top-1
-    top_idx = int(torch.tensor(probs).argmax().item())
-    top_label = idx_to_class[top_idx]
-    top_conf  = probs[top_idx]
-    return class_to_prob, top_label, top_conf
+    return class_to_prob
 
 # =========================
 # UI
@@ -119,7 +116,6 @@ st.caption("อัปโหลดภาพ แล้วกด **Predict** – �
 classes = load_classes()
 model   = load_model(num_classes=len(classes))
 
-# สร้างแผนที่ชื่อ (normalize) สำหรับการเรียง "แสดงผล"
 norm_map = {_norm_name(name): name for name in classes}
 desired_norm = [_norm_name(s) for s in DESIRED_ORDER]
 
@@ -134,13 +130,15 @@ if uploaded:
 
     if st.button("Predict", type="primary"):
         with st.spinner("Running inference..."):
-            class_probs, top_label, top_conf = predict_image(model, image, classes)
+            class_probs = predict_image(model, image, classes)
 
-        st.subheader("ผลลัพธ์")
-        st.write(f"**Predicted:** {top_label} ({top_conf*100:.2f}%)")
-        st.write(f"**Model:** EfficientNet-B7 (timm) | **Device:** {DEVICE.upper()}")
+        # ====== HEADER ======
+        st.markdown(
+            "<div style='font-size:2.2rem; font-weight:800; margin: 0.25rem 0 1rem 0;'>Prediction Result</div>",
+            unsafe_allow_html=True
+        )
 
-        st.markdown("### แสดงทุกคลาส (เรียงตามที่กำหนด)")
+        # เตรียมข้อมูลเรียงตาม DESIRED_ORDER
         rows = []
         for want_norm in desired_norm:
             if want_norm in norm_map:
@@ -150,13 +148,38 @@ if uploaded:
             else:
                 rows.append((f"[Missing in classes.txt] {want_norm}", 0.0))
 
-        for name, p in rows:
-            st.write(f"- {name}: **{p*100:.2f}%**")
+        max_idx = max(range(len(rows)), key=lambda i: rows[i][1]) if rows else -1
 
-        st.markdown("### Top-k (เรียงจากมากไปน้อย)")
-        sorted_items = sorted(class_probs.items(), key=lambda kv: kv[1], reverse=True)
-        for name, p in sorted_items:
-            st.write(f"- {name}: {p*100:.2f}%")
+        # แสดงผลเป็นข้อความ
+        for i, (name, p) in enumerate(rows):
+            is_top = (i == max_idx)
+            color = "#2F6DF6" if is_top else "inherit"
+            weight = "900" if is_top else "700"
+            st.markdown(
+                f"<div style='font-size:2.0rem; font-weight:{weight}; color:{color}; margin:0.15rem 0;'>"
+                f"{name} : {p*100:.2f}%</div>",
+                unsafe_allow_html=True
+            )
+
+        # ====== กราฟแท่งแนวนอน ======
+        names   = [n for n, _ in rows]
+        percents = [p * 100.0 for _, p in rows]
+
+        bar_colors = ["#D1D5DB"] * len(rows)
+        if 0 <= max_idx < len(rows):
+            bar_colors[max_idx] = "#2F6DF6"
+
+        fig, ax = plt.subplots(figsize=(7, 3.5))
+        ax.barh(names, percents, color=bar_colors)
+        ax.invert_yaxis()
+        ax.set_xlabel("Probability (%)")
+        ax.set_xlim(0, max(100, (max(percents) if percents else 100)))
+        for y, v in enumerate(percents):
+            ax.text(v + 0.5, y, f"{v:.2f}%", va="center")
+        st.pyplot(fig)
+
+        # ====== Info Model/Device ======
+        st.write(f"**Model:** EfficientNet-B7 (timm) · **Device:** {DEVICE.upper()}")
 
         mismatches = [dn for dn in desired_norm if dn not in norm_map]
         if mismatches:
