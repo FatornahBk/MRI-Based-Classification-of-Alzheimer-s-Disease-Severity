@@ -1,4 +1,8 @@
+# app.py
 import os
+import io
+from collections import OrderedDict
+
 import streamlit as st
 from PIL import Image
 import torch
@@ -6,127 +10,159 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from timm import create_model
 
-# ---------------- CONFIG ----------------
-DEVICE = "cpu"
-IMAGE_SIZE = 600
-CLASSES_TXT = "classes.txt"
-WEIGHTS_DIR = "weights"
-WEIGHTS_FILE = "weights/efficientnet_b7_fold1_state_dict.pt"
+# =========================
+# Page / Defaults
+# =========================
+st.set_page_config(page_title="MRI-based Classification (EfficientNet-B7)", layout="centered")
 
-# ตอนโหลด (ตอนนี้ไม่ต้องใส่ weights_only=False แล้ว)
-sd = torch.load(WEIGHTS_FILE, map_location=DEVICE)  # 2.6 ดีฟอลต์ weights_only=True โอเค
-model.load_state_dict(sd, strict=False)   # ใช้ไฟล์ที่แปลงแล้ว
-MODEL_NAME = "tf_efficientnet_b7_ns (fold1)"
+DEVICE      = "cpu"
+IMAGE_SIZE  = 600
+CLASSES_TXT = os.environ.get("CLASSES_TXT", "classes.txt")
 
-# ลำดับที่ผู้ใช้ต้องการให้โชว์ผลลัพธ์ (เรียงคงที่)
-TARGET_ORDER = [
+# ลำดับการ "แสดงผล" ตามที่ต้องการ (ไม่กระทบค่าจริงจากโมเดล)
+DESIRED_ORDER = [
     "Mild Impairment",
     "Moderate Impairment",
     "No Impairment",
     "Very Mild Impairment",
 ]
 
-# ---------------- LOAD CLASSES ----------------
-@st.cache_resource(show_spinner=False)
-def load_class_names(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return [ln.strip() for ln in f if ln.strip()]
+# พาธไฟล์น้ำหนัก (ตั้ง ENV MODEL_WEIGHTS ได้)
+DEFAULT_WEIGHTS  = "weights/efficientnet_b7_fold1_state_dict.pt"
+FALLBACK_WEIGHTS = "efficientnet_b7_fold1_state_dict.pt"
+MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
+if not os.path.exists(MODEL_WEIGHTS):
+    if os.path.exists(FALLBACK_WEIGHTS):
+        MODEL_WEIGHTS = FALLBACK_WEIGHTS
 
-# ---------------- MODEL ----------------
+# =========================
+# Helpers
+# =========================
+def _norm_name(s: str) -> str:
+    return " ".join(s.lower().strip().split())
+
 @st.cache_resource(show_spinner=False)
-def load_model(weights_path, num_classes):
-    model = create_model("tf_efficientnet_b7_ns", pretrained=False, num_classes=num_classes)
-    model.to(DEVICE)
-    # โหลด state_dict เพียวๆ ที่เราแปลงมาแล้ว
-    sd = torch.load(weights_path, map_location=DEVICE)
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    if missing or unexpected:
-        st.info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+def load_classes():
+    if not os.path.exists(CLASSES_TXT):
+        st.error(f"classes.txt not found at: {CLASSES_TXT}")
+        st.stop()
+    with open(CLASSES_TXT, "r", encoding="utf-8") as f:
+        classes = [line.strip() for line in f if line.strip()]
+    if len(classes) == 0:
+        st.error("classes.txt is empty.")
+        st.stop()
+    return classes
+
+@st.cache_resource(show_spinner=False)
+def load_model(num_classes: int):
+    model = create_model(
+        "efficientnet_b7",
+        pretrained=False,
+        num_classes=num_classes,
+        drop_rate=0.0,
+        drop_path_rate=0.0
+    )
     model.eval()
+    model.to(DEVICE)
+
+    if not os.path.exists(MODEL_WEIGHTS):
+        st.warning(
+            f"Model weights not found at: {MODEL_WEIGHTS}\n"
+            "Upload weights or set env MODEL_WEIGHTS to a valid path."
+        )
+        return model
+
+    try:
+        sd = torch.load(MODEL_WEIGHTS, map_location=DEVICE)
+        # รองรับกรณี pack เป็น {'state_dict': {...}}
+        if isinstance(sd, dict) and "state_dict" in sd and all(not k.startswith("model.") for k in sd["state_dict"].keys()):
+            sd = sd["state_dict"]
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if missing or unexpected:
+            st.info(f"Loaded with non-strict mode. Missing keys: {len(missing)} | Unexpected keys: {len(unexpected)}")
+    except Exception as e:
+        st.error(
+            "Failed to load model weights. Make sure it's a plain state_dict compatible with timm EfficientNet-B7 head.\n\n"
+            f"{type(e).__name__}: {e}"
+        )
     return model
 
-# ---------------- TRANSFORM ----------------
-@st.cache_resource(show_spinner=False)
-def get_transform():
+def build_transform(size: int = IMAGE_SIZE):
     return T.Compose([
-        T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        T.Resize((size, size)),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406],
                     std=[0.229, 0.224, 0.225]),
     ])
 
-def predict_full(model, img, class_names):
-    """คืน dict {class_name: prob_float} ของทุกคลาส"""
-    tfm = get_transform()
-    x = tfm(img).unsqueeze(0).to(DEVICE)
+def predict_image(model, img: Image.Image, classes):
+    tfm = build_transform(IMAGE_SIZE)
+    x = tfm(img.convert("RGB")).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
         logits = model(x)
-        probs = F.softmax(logits, dim=1)[0].cpu().numpy().tolist()
-    # จับคู่ชื่อคลาสกับ prob
-    out = {cls: float(p) for cls, p in zip(class_names, probs)}
-    return out
+        probs = F.softmax(logits, dim=1)[0].cpu().tolist()
+    # แม็ป index → ชื่อคลาสตาม classes.txt
+    idx_to_class = {i: c for i, c in enumerate(classes)}
+    class_to_prob = OrderedDict((idx_to_class[i], float(p)) for i, p in enumerate(probs))
+    # Top-1
+    top_idx = int(torch.tensor(probs).argmax().item())
+    top_label = idx_to_class[top_idx]
+    top_conf  = probs[top_idx]
+    return class_to_prob, top_label, top_conf
 
-# ---------------- UI ----------------
-st.set_page_config(page_title="MRI-based Classification (EfficientNet-B7)")
-st.title("MRI-Based Classification of Alzheimer's Disease Severity")
-st.caption(f"Model: **{MODEL_NAME}**")
+# =========================
+# UI
+# =========================
+st.title("MRI-based Classification (EfficientNet-B7)")
+st.caption("อัปโหลดภาพ แล้วกด **Predict** – ระบบจะแสดงทุกคลาสและเปอร์เซ็นต์ โดยเรียงตามที่คุณกำหนดไว้")
 
-# โหลดชื่อคลาส + เช็คไฟล์น้ำหนัก
-class_names = load_class_names(CLASSES_TXT)
-weights_path = os.path.join(WEIGHTS_DIR, WEIGHTS_FILE)
-if not os.path.exists(weights_path):
-    st.error(f"ไม่พบไฟล์น้ำหนัก {weights_path}")
-    st.stop()
+classes = load_classes()
+model   = load_model(num_classes=len(classes))
 
-# แจ้งเตือนถ้าจำนวน/ชื่อคลาสไม่ตรงกับ TARGET_ORDER
-if len(class_names) != len(TARGET_ORDER):
-    st.warning(f"จำนวนคลาสใน classes.txt ({len(class_names)}) ไม่ตรงกับ TARGET_ORDER ({len(TARGET_ORDER)})")
-
-# สร้าง mapping แบบไม่สนช่องว่าง/ตัวพิมพ์ใหญ่เล็ก เพื่อความทนทาน
-norm = lambda s: " ".join(s.split()).strip().lower()
-class_names_norm = {norm(c): c for c in class_names}
-target_norm = [norm(t) for t in TARGET_ORDER]
-missing_in_model = [t for t in target_norm if t not in class_names_norm]
-if missing_in_model:
-    st.warning("พบชื่อคลาสใน TARGET_ORDER ที่ไม่อยู่ใน classes.txt: " +
-               ", ".join([TARGET_ORDER[target_norm.index(m)] for m in missing_in_model]))
-
-model = load_model(weights_path, num_classes=len(class_names))
-
-# เก็บรูป/ผลลัพธ์ใน session_state
-if "uploaded_img" not in st.session_state:
-    st.session_state.uploaded_img = None
-if "dist" not in st.session_state:
-    st.session_state.dist = None
+# สร้างแผนที่ชื่อ (normalize) สำหรับการเรียง "แสดงผล"
+norm_map = {_norm_name(name): name for name in classes}
+desired_norm = [_norm_name(s) for s in DESIRED_ORDER]
 
 uploaded = st.file_uploader("อัปโหลดภาพ (JPG/PNG)", type=["jpg", "jpeg", "png"])
 if uploaded:
-    st.session_state.uploaded_img = Image.open(uploaded).convert("RGB")
-    st.image(st.session_state.uploaded_img, caption="ภาพที่อัปโหลด", use_column_width=True)
-    st.session_state.dist = None  # เคลียร์ผลเดิมเมื่อเลือกรูปใหม่
+    try:
+        image = Image.open(io.BytesIO(uploaded.read()))
+        st.image(image, caption="Input image", use_container_width=True)
+    except Exception as e:
+        st.error(f"Unable to open the image: {e}")
+        st.stop()
 
-# ปุ่ม Predict
-btn = st.button("🔮 Predict", type="primary", disabled=st.session_state.uploaded_img is None)
-if btn and st.session_state.uploaded_img is not None:
-    with st.spinner("กำลังพยากรณ์..."):
-        full_dist = predict_full(model, st.session_state.uploaded_img, class_names)
-        st.session_state.dist = full_dist
+    if st.button("Predict", type="primary"):
+        with st.spinner("Running inference..."):
+            class_probs, top_label, top_conf = predict_image(model, image, classes)
 
-# แสดงผลลัพธ์ "ทุกคลาส" ตามลำดับที่กำหนด
-if st.session_state.dist:
-    st.subheader("ผลลัพธ์ตามลำดับที่กำหนด")
-    # แสดงทีละคลาสตาม TARGET_ORDER
-    for t_name in TARGET_ORDER:
-        key = norm(t_name)
-        # หากชื่อใน TARGET_ORDER ไม่ตรงกับ classes.txt แบบเป๊ะ ให้หาแบบ normalize
-        if key in class_names_norm:
-            actual_name = class_names_norm[key]
-            p = st.session_state.dist.get(actual_name, 0.0)
-        else:
-            # ไม่พบชื่อคลาสนี้ในโมเดล → โชว์ 0% และเตือนด้านบนแล้ว
-            p = 0.0
-        st.markdown(f"- **{t_name}**: {p*100:.2f}%")
-        st.progress(min(max(p, 0.0), 1.0))
+        st.subheader("ผลลัพธ์")
+        st.write(f"**Predicted:** {top_label} ({top_conf*100:.2f}%)")
+        st.write(f"**Model:** EfficientNet-B7 (timm) | **Device:** {DEVICE.upper()}")
 
-    # สรุปคลาสที่น่าจะใช่มากที่สุด (Top-1)
-    top_class = max(st.session_state.dist.items(), key=lambda kv: kv[1])
+        st.markdown("### แสดงทุกคลาส (เรียงตามที่กำหนด)")
+        rows = []
+        for want_norm in desired_norm:
+            if want_norm in norm_map:
+                real_name = norm_map[want_norm]
+                prob = class_probs.get(real_name, 0.0)
+                rows.append((real_name, prob))
+            else:
+                rows.append((f"[Missing in classes.txt] {want_norm}", 0.0))
+
+        for name, p in rows:
+            st.write(f"- {name}: **{p*100:.2f}%**")
+
+        st.markdown("### Top-k (เรียงจากมากไปน้อย)")
+        sorted_items = sorted(class_probs.items(), key=lambda kv: kv[1], reverse=True)
+        for name, p in sorted_items:
+            st.write(f"- {name}: {p*100:.2f}%")
+
+        mismatches = [dn for dn in desired_norm if dn not in norm_map]
+        if mismatches:
+            st.warning(
+                "บางชื่อที่ต้องการแสดง ไม่พบใน classes.txt โปรดตรวจสะกด/ตัวพิมพ์:\n- " +
+                "\n- ".join(mismatches)
+            )
+else:
+    st.info("อัปโหลดภาพก่อน แล้วค่อยกด Predict")
