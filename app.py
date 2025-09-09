@@ -65,11 +65,29 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-DEVICE = "cpu"
-IMAGE_SIZE = 600
-CLASSES_TXT = os.environ.get("classes.txt")
+# =========================
+# Config helpers (robust ENV/Secrets)
+# =========================
+def get_cfg(key: str, default: str) -> str:
+    """Get config value from ENV -> st.secrets -> default. Fallback if falsy."""
+    v = os.environ.get(key)
+    if not v:
+        try:
+            v = st.secrets.get(key)  # type: ignore[attr-defined]
+        except Exception:
+            v = None
+    if not v:
+        v = default
+    return str(v)
 
-# ลำดับการ "แสดงผล"
+# =========================
+# Config
+# =========================
+DEVICE = "cpu"
+IMAGE_SIZE = 299  # Inception-v3 standard input size
+CLASSES_TXT = get_cfg("CLASSES_TXT", "classes.txt")
+
+# ลำดับการ "แสดงผล" ในหน้า UI
 DESIRED_ORDER = [
     "Mild Impairment",
     "Moderate Impairment",
@@ -77,13 +95,16 @@ DESIRED_ORDER = [
     "Very Mild Impairment",
 ]
 
-# พาธไฟล์น้ำหนัก
-DEFAULT_WEIGHTS = "weights/inception_v3_checkpoint_fold0.pt"
-FALLBACK_WEIGHTS = "inception_v3_checkpoint_fold0.pt"
-MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
-if not os.path.exists(MODEL_WEIGHTS):
-    if os.path.exists(FALLBACK_WEIGHTS):
-        MODEL_WEIGHTS = FALLBACK_WEIGHTS
+# พาธไฟล์น้ำหนัก (ตั้งผ่าน ENV/Secrets ได้) + Fallback
+DEFAULT_WEIGHTS = "weights/inception_v3_fold0_state_dict.pt"
+FALLBACK_WEIGHTS = "inception_v3_fold0_state_dict.pt"
+MODEL_WEIGHTS = get_cfg("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
+
+# URL สำหรับดาวน์โหลดไฟล์น้ำหนักอัตโนมัติ (ถ้ามี)
+MODEL_WEIGHTS_URL = get_cfg("MODEL_WEIGHTS_URL", "").strip()
+
+if not os.path.exists(MODEL_WEIGHTS) and os.path.exists(FALLBACK_WEIGHTS):
+    MODEL_WEIGHTS = FALLBACK_WEIGHTS
 
 # =========================
 # Helpers
@@ -93,18 +114,57 @@ def _norm_name(s: str) -> str:
 
 @st.cache_resource(show_spinner=False)
 def load_classes():
-    if not os.path.exists(CLASSES_TXT):
-        st.error(f"classes.txt not found at: {CLASSES_TXT}")
+    path = (CLASSES_TXT or "").strip()
+    if not isinstance(path, str) or path == "":
+        path = "classes.txt"  # final safety
+    if not os.path.exists(path):
+        st.error(f"`classes.txt` not found at: {path}\n\n"
+                 "ตั้งค่า CLASSES_TXT ให้ถูก หรือใส่ไฟล์ไว้ข้างๆ app.py")
         st.stop()
-    with open(CLASSES_TXT, "r", encoding="utf-8") as f:
-        classes = [line.strip() for line in f if line.strip()]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            classes = [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        st.error(f"อ่านไฟล์ classes.txt ไม่ได้: {type(e).__name__}: {e}")
+        st.stop()
+
     if len(classes) == 0:
-        st.error("classes.txt is empty.")
+        st.error("classes.txt ไม่มีข้อมูลคลาส")
         st.stop()
     return classes
 
+def _download(url: str, dst_path: str) -> bool:
+    """ดาวน์โหลดไฟล์น้ำหนัก (ถ้าตั้ง URL)"""
+    try:
+        import requests
+        os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
+        with st.spinner("Downloading model weights..."):
+            r = requests.get(url, timeout=90)
+            r.raise_for_status()
+            with open(dst_path, "wb") as f:
+                f.write(r.content)
+        return True
+    except Exception as e:
+        st.error(f"Download weights failed: {e}")
+        return False
+
+@st.cache_resource(show_spinner=False)
+def ensure_weights_local(path: str, url: str | None = None) -> str | None:
+    if isinstance(path, str) and path.strip() and os.path.exists(path):
+        return path
+    if url:
+        ok = _download(url, path)
+        if ok and os.path.exists(path):
+            return path
+    return None
+
 @st.cache_resource(show_spinner=False)
 def load_model(num_classes: int):
+    """
+    โหลด Inception-v3 (timm) + ใส่ head ตามจำนวนคลาส
+    รองรับการโหลด state_dict แบบ plain
+    """
+    # สร้างโมเดล
     model = create_model(
         "inception_v3",
         pretrained=False,
@@ -115,19 +175,27 @@ def load_model(num_classes: int):
     model.eval()
     model.to(DEVICE)
 
-    if not os.path.exists(MODEL_WEIGHTS):
+    # ให้แน่ใจว่ามีไฟล์น้ำหนัก (จะดาวน์โหลดถ้ามี URL)
+    weights_path = ensure_weights_local(MODEL_WEIGHTS, MODEL_WEIGHTS_URL)
+
+    if not weights_path or not os.path.exists(weights_path):
         st.warning(
             f"Model weights not found at: {MODEL_WEIGHTS}\n"
-            "Upload weights or set env MODEL_WEIGHTS to a valid path."
+            "Running with randomly-initialized head. "
+            "อัปโหลดไฟล์, ตั้ง MODEL_WEIGHTS เป็นพาธที่ถูกต้อง, "
+            "หรือกำหนด MODEL_WEIGHTS_URL เพื่อดาวน์โหลดอัตโนมัติ."
         )
         return model
 
+    # โหลด state_dict แบบปลอดภัย
     try:
-        sd = torch.load(MODEL_WEIGHTS, map_location=DEVICE)
-        if isinstance(sd, dict) and "state_dict" in sd and all(
-            not k.startswith("model.") for k in sd["state_dict"].keys()
-        ):
+        sd = torch.load(weights_path, map_location=DEVICE)
+        # รองรับกรณี save({'state_dict': ...}) หรือ key มี prefix "model."/ "module."
+        if isinstance(sd, dict) and "state_dict" in sd:
             sd = sd["state_dict"]
+        if isinstance(sd, dict):
+            sd = {k.replace("model.", "").replace("module.", ""): v for k, v in sd.items()}
+
         missing, unexpected = model.load_state_dict(sd, strict=False)
         if missing or unexpected:
             st.info(
@@ -135,12 +203,13 @@ def load_model(num_classes: int):
             )
     except Exception as e:
         st.error(
-            "Failed to load model weights. Make sure it's a plain state_dict compatible with timm inception_v3 head.\n\n"
+            "Failed to load model weights. Make sure it's a plain state_dict compatible with timm Inception-v3 head.\n\n"
             f"{type(e).__name__}: {e}"
         )
     return model
 
 def build_transform(size: int = IMAGE_SIZE):
+    # Inception-v3 ใช้ ImageNet mean/std ได้ตามปกติ
     return T.Compose(
         [
             T.Resize((size, size)),
@@ -181,7 +250,17 @@ def render_progress_block(name: str, percent: float, is_top: bool):
 # UI
 # =========================
 st.title("🧠 MRI-Based Classification of Alzheimer's Disease Severity")
-st.caption("อัปโหลดภาพ MRI แล้วกด **Predict** เพื่อดูผลการประเมินความรุนแรง")
+st.caption("อัปโหลดภาพ MRI แล้วกด **Predict** เพื่อดูผลการประเมินความรุนแรง (Inception-v3)")
+
+# โชว์ config ที่ resolve แล้ว (ช่วยดีบักเวลา path เพี้ยน)
+with st.expander("Debug: Paths & Config"):
+    st.write({
+        "CLASSES_TXT": CLASSES_TXT,
+        "MODEL_WEIGHTS": MODEL_WEIGHTS,
+        "MODEL_WEIGHTS_URL(set?)": bool(MODEL_WEIGHTS_URL),
+        "DEVICE": DEVICE,
+        "IMAGE_SIZE": IMAGE_SIZE,
+    })
 
 classes = load_classes()
 model = load_model(num_classes=len(classes))
@@ -227,7 +306,7 @@ if uploaded:
         # ====== Info Model/Device ======
         st.markdown(
             f"<div style='margin-top:1rem; font-size:0.9rem; color:#9CA3AF;'>"
-            f"Model: EfficientNet-B7 (timm) · Device: {DEVICE.upper()}</div>",
+            f"Model: Inception-v3 (timm) · Device: {DEVICE.upper()} · Input: {IMAGE_SIZE}×{IMAGE_SIZE}</div>",
             unsafe_allow_html=True,
         )
 
