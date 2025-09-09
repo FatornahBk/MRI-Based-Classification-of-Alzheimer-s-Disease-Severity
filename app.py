@@ -206,10 +206,7 @@ if uploaded:
     if st.button("Predict", type="primary"):
         with st.spinner("Running inference..."):
             class_probs = predict_image(model, image, classes)
-
-        # ====== CARD: Prediction Result ======
-        st.markdown('<div class="result-card">', unsafe_allow_html=True)
-        st.markdown('<div class="result-title">Prediction Result</div>', unsafe_allow_html=True)
+            
 
         # Top-1 เพื่อโชว์บนการ์ด Predicted
         if class_probs:
