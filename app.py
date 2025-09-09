@@ -8,7 +8,6 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
-from timm import create_model
 
 # =========================
 # Page / Defaults
@@ -89,7 +88,7 @@ DESIRED_ORDER = [
     "Very Mild Impairment",
 ]
 
-# พาธไฟล์น้ำหนัก
+# พาธไฟล์น้ำหนัก (ไม่มีก็รันต่อได้)
 DEFAULT_WEIGHTS  = "weights/efficientnet_b7_fold1_state_dict.pt"
 FALLBACK_WEIGHTS = "efficientnet_b7_fold1_state_dict.pt"
 MODEL_WEIGHTS = os.environ.get("MODEL_WEIGHTS", DEFAULT_WEIGHTS)
@@ -103,19 +102,32 @@ def _norm_name(s: str) -> str:
     return " ".join(s.lower().strip().split())
 
 @st.cache_resource(show_spinner=False)
-def load_classes():
-    if not os.path.exists(CLASSES_TXT):
-        st.error(f"classes.txt not found at: {CLASSES_TXT}")
-        st.stop()
-    with open(CLASSES_TXT, "r", encoding="utf-8") as f:
-        classes = [line.strip() for line in f if line.strip()]
+def load_classes_safe():
+    """
+    เวอร์ชันปลอดภัย: ถ้าไม่มี/ว่าง -> ไม่ stop ให้ UI ขึ้นได้ก่อน
+    """
+    path = CLASSES_TXT
+    if not os.path.exists(path):
+        st.warning(f"⚠️ classes.txt not found at: {path}. The UI is loaded but prediction is disabled.")
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            classes = [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        st.warning(f"⚠️ Cannot read classes.txt: {e}")
+        return None
     if not classes:
-        st.error("classes.txt is empty.")
-        st.stop()
+        st.warning("⚠️ classes.txt is empty. The UI is loaded but prediction is disabled.")
+        return None
     return classes
 
 @st.cache_resource(show_spinner=False)
 def load_model(num_classes: int):
+    """
+    Lazy import timm + โหลด weights แบบไม่ล้ม ถ้าไฟล์หายก็ใช้โมเดลเปล่า
+    """
+    from timm import create_model  # lazy import เพื่อลดดีเลย์ตอนบูต
+
     model = create_model(
         "efficientnet_b7",
         pretrained=False,
@@ -125,10 +137,11 @@ def load_model(num_classes: int):
     )
     model.eval().to(DEVICE)
 
+    # ถ้าไม่มีไฟล์น้ำหนัก ให้ใช้หัวแบบสุ่มไปก่อน (ไม่หยุดแอป)
     if not os.path.exists(MODEL_WEIGHTS):
         st.warning(
             f"Model weights not found at: {MODEL_WEIGHTS}\n"
-            "Upload weights or set env MODEL_WEIGHTS to a valid path."
+            "Running with randomly initialized head."
         )
         return model
 
@@ -143,8 +156,8 @@ def load_model(num_classes: int):
         if missing or unexpected:
             st.info(f"Loaded with non-strict mode. Missing: {len(missing)} | Unexpected: {len(unexpected)}")
     except Exception as e:
-        st.error(
-            "Failed to load model weights. Ensure it's a plain state_dict compatible with timm EfficientNet-B7 head.\n\n"
+        st.warning(
+            "⚠️ Failed to load model weights. Using randomly initialized head instead.\n\n"
             f"{type(e).__name__}: {e}"
         )
     return model
@@ -187,10 +200,8 @@ def render_progress_block(name: str, percent: float, is_top: bool):
 st.title("🧠 MRI-Based Classification of Alzheimer's Disease Severity")
 st.caption("อัปโหลดภาพ MRI แล้วกด **Predict** เพื่อดูผลการประเมินความรุนแรง")
 
-classes = load_classes()
-model   = load_model(num_classes=len(classes))
-
-norm_map     = {_norm_name(name): name for name in classes}
+classes = load_classes_safe()  # ไม่ stop ถ้าไม่มีไฟล์
+norm_map = {_norm_name(name): name for name in classes} if classes else {}
 desired_norm = [_norm_name(s) for s in DESIRED_ORDER]
 
 uploaded = st.file_uploader("อัปโหลดภาพ (JPG/PNG)", type=["jpg", "jpeg", "png"])
@@ -204,54 +215,64 @@ if uploaded:
         st.stop()
 
     if st.button("Predict", type="primary"):
-        with st.spinner("Running inference..."):
-            class_probs = predict_image(model, image, classes)
-            
-
-        # Top-1 เพื่อโชว์บนการ์ด Predicted
-        if class_probs:
-            top_name, top_prob = max(class_probs.items(), key=lambda kv: kv[1])
+        if not classes:
+            st.error("Cannot predict: classes.txt is missing or empty.")
         else:
-            top_name, top_prob = "-", 0.0
+            with st.spinner("Preparing model..."):
+                model = load_model(num_classes=len(classes))  # โหลดตอนกดปุ่ม เพื่อลดดีเลย์บูต
 
-        st.markdown(
-            f"""
-            <div class="predicted-title">Predicted: {top_name}</div>
-            <div class="pill-wrap"><span class="pill">Confidence: {top_prob*100:.2f}%</span></div>
-            """,
-            unsafe_allow_html=True,
-        )
+            with st.spinner("Running inference..."):
+                class_probs = predict_image(model, image, classes)
 
-        # เตรียมข้อมูลแสดงตาม DESIRED_ORDER
-        rows = []
-        for want_norm in desired_norm:
-            if want_norm in norm_map:
-                real = norm_map[want_norm]
-                rows.append((real, class_probs.get(real, 0.0)))
+            # ====== CARD: Prediction Result ======
+            st.markdown('<div class="result-card">', unsafe_allow_html=True)
+            st.markdown('<div class="result-title">Prediction Result</div>', unsafe_allow_html=True)
+
+            # Top-1 เพื่อโชว์บนการ์ด Predicted
+            if class_probs:
+                top_name, top_prob = max(class_probs.items(), key=lambda kv: kv[1])
             else:
-                rows.append((f"[Missing in classes.txt] {want_norm}", 0.0))
+                top_name, top_prob = "-", 0.0
 
-        max_idx = max(range(len(rows)), key=lambda i: rows[i][1]) if rows else -1
-
-        # Progress bars ต่อคลาส
-        for i, (name, p) in enumerate(rows):
-            render_progress_block(name, p * 100.0, is_top=(i == max_idx))
-
-        st.markdown("</div>", unsafe_allow_html=True)  # close result-card
-
-        # Info Model/Device
-        st.markdown(
-            f"<div style='margin-top:1rem; font-size:0.9rem; color:#9CA3AF;'>"
-            f"Model: EfficientNet-B7 (timm) · Device: {DEVICE.upper()}</div>",
-            unsafe_allow_html=True,
-        )
-
-        # แจ้งเตือนชื่อไม่ตรงใน classes.txt
-        mismatches = [dn for dn in desired_norm if dn not in norm_map]
-        if mismatches:
-            st.warning(
-                "บางชื่อที่ต้องการแสดง ไม่พบใน classes.txt โปรดตรวจสะกด/ตัวพิมพ์:\n- "
-                + "\n- ".join(mismatches)
+            st.markdown(
+                f"""
+                <div class="predicted-title">Predicted: {top_name}</div>
+                <div class="pill-wrap"><span class="pill">Confidence: {top_prob*100:.2f}%</span></div>
+                """,
+                unsafe_allow_html=True,
             )
+
+            # เตรียมข้อมูลแสดงตาม DESIRED_ORDER
+            rows = []
+            for want_norm in desired_norm:
+                if want_norm in norm_map:
+                    real = norm_map[want_norm]
+                    rows.append((real, class_probs.get(real, 0.0)))
+                else:
+                    rows.append((f"[Missing in classes.txt] {want_norm}", 0.0))
+
+            max_idx = max(range(len(rows)), key=lambda i: rows[i][1]) if rows else -1
+
+            # Progress bars ต่อคลาส
+            for i, (name, p) in enumerate(rows):
+                render_progress_block(name, p * 100.0, is_top=(i == max_idx))
+
+            # ปิดการ์ด
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            # Info Model/Device
+            st.markdown(
+                f"<div style='margin-top:1rem; font-size:0.9rem; color:#9CA3AF;'>"
+                f"Model: EfficientNet-B7 (timm) · Device: {DEVICE.upper()}</div>",
+                unsafe_allow_html=True,
+            )
+
+            # แจ้งเตือนชื่อไม่ตรงใน classes.txt
+            mismatches = [dn for dn in desired_norm if dn not in norm_map]
+            if mismatches:
+                st.warning(
+                    "บางชื่อที่ต้องการแสดง ไม่พบใน classes.txt โปรดตรวจสะกด/ตัวพิมพ์:\n- "
+                    + "\n- ".join(mismatches)
+                )
 else:
     st.info("อัปโหลดภาพ แล้วกด Predict")
