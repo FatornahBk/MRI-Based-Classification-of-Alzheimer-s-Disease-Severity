@@ -10,9 +10,6 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from timm import create_model
 
-# ==== NEW: matplotlib for bar chart ====
-import matplotlib.pyplot as plt
-
 # =========================
 # Page / Defaults
 # =========================
@@ -107,11 +104,38 @@ def predict_image(model, img: Image.Image, classes):
     class_to_prob = OrderedDict((idx_to_class[i], float(p)) for i, p in enumerate(probs))
     return class_to_prob
 
+def render_progress_block(name: str, percent: float, is_top: bool):
+    """
+    แสดงชื่อคลาส + แถบเปอร์เซ็นต์ (progress bar) ใต้ชื่อ
+    - is_top=True จะเปลี่ยนสีชื่อและแถบเป็นสีน้ำเงิน
+    """
+    percent_clamped = max(0.0, min(100.0, percent))
+    color_bar   = "#2F6DF6" if is_top else "#9CA3AF"   # top = blue, others = gray-400
+    color_text  = "#2F6DF6" if is_top else "inherit"
+    weight_text = "900" if is_top else "700"
+
+    html = f"""
+    <div style="margin: 0.35rem 0 1rem 0;">
+      <div style="font-size:2.0rem; font-weight:{weight_text}; color:{color_text};">
+        {name} : {percent_clamped:.2f}%
+      </div>
+      <div style="width:100%; background:#E5E7EB; border-radius:10px; height:16px; overflow:hidden;">
+        <div style="
+            width:{percent_clamped}%;
+            height:100%;
+            background:{color_bar};
+            border-radius:10px;">
+        </div>
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
 # =========================
 # UI
 # =========================
-st.title("MRI-based Classification (EfficientNet-B7)")
-st.caption("อัปโหลดภาพ แล้วกด **Predict** – ระบบจะแสดงทุกคลาสและเปอร์เซ็นต์ โดยเรียงตามที่คุณกำหนดไว้")
+st.title("MRI-Based Classification of Alzheimer's Disease Severity")
+st.caption("อัปโหลดภาพ แล้วกด **Predict**")
 
 classes = load_classes()
 model   = load_model(num_classes=len(classes))
@@ -134,7 +158,7 @@ if uploaded:
 
         # ====== HEADER ======
         st.markdown(
-            "<div style='font-size:2.2rem; font-weight:800; margin: 0.25rem 0 1rem 0;'>Prediction Result</div>",
+            "<div style='font-size:2.2rem; font-weight:800; margin: 0.25rem 0 0.75rem 0;'>Prediction Result</div>",
             unsafe_allow_html=True
         )
 
@@ -150,36 +174,12 @@ if uploaded:
 
         max_idx = max(range(len(rows)), key=lambda i: rows[i][1]) if rows else -1
 
-        # แสดงผลเป็นข้อความ
+        # ====== แสดงชื่อ + "แถบเปอร์เซ็นต์" ใต้ชื่อ (แทนกราฟภาพรวม) ======
         for i, (name, p) in enumerate(rows):
-            is_top = (i == max_idx)
-            color = "#2F6DF6" if is_top else "inherit"
-            weight = "900" if is_top else "700"
-            st.markdown(
-                f"<div style='font-size:2.0rem; font-weight:{weight}; color:{color}; margin:0.15rem 0;'>"
-                f"{name} : {p*100:.2f}%</div>",
-                unsafe_allow_html=True
-            )
-
-        # ====== กราฟแท่งแนวนอน ======
-        names   = [n for n, _ in rows]
-        percents = [p * 100.0 for _, p in rows]
-
-        bar_colors = ["#D1D5DB"] * len(rows)
-        if 0 <= max_idx < len(rows):
-            bar_colors[max_idx] = "#2F6DF6"
-
-        fig, ax = plt.subplots(figsize=(7, 3.5))
-        ax.barh(names, percents, color=bar_colors)
-        ax.invert_yaxis()
-        ax.set_xlabel("Probability (%)")
-        ax.set_xlim(0, max(100, (max(percents) if percents else 100)))
-        for y, v in enumerate(percents):
-            ax.text(v + 0.5, y, f"{v:.2f}%", va="center")
-        st.pyplot(fig)
+            render_progress_block(name, p * 100.0, is_top=(i == max_idx))
 
         # ====== Info Model/Device ======
-        st.write(f"**Model:** EfficientNet-B7 (timm) · **Device:** {DEVICE.upper()}")
+        st.write(f"**Model:** EfficientNet-B7 (timm) · **Device:** {DEVICE.UPPER()}")
 
         mismatches = [dn for dn in desired_norm if dn not in norm_map]
         if mismatches:
@@ -188,4 +188,4 @@ if uploaded:
                 "\n- ".join(mismatches)
             )
 else:
-    st.info("อัปโหลดภาพก่อน แล้วค่อยกด Predict")
+    st.info("อัปโหลดภาพ แล้วกด Predict")
