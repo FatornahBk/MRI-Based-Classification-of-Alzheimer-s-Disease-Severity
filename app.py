@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 # =========================
 # Page / Defaults
 # =========================
-st.set_page_config(page_title="MRI-based Classification (EfficientNet-B7)", layout="centered")
+st.set_page_config(page_title="MRI-Based Classification of Alzheimer's Disease Severity", layout="centered")
 
 DEVICE      = "cpu"
 IMAGE_SIZE  = 600
