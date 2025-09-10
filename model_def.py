@@ -1,8 +1,12 @@
 import torch
-from timm import create_model
+from torchvision.models import inception_v3
 
 def build_model(num_classes: int, device: str = "cpu"):
-    # ไม่ใส่ argument แปลก ๆ ที่บางโมเดลไม่รองรับ (กัน error 'unexpected keyword')
-    model = create_model("inception_v3", pretrained=False, num_classes=num_classes)
+    # ปิด aux_logits เพื่อให้ forward คืน logits เดียว (สะดวกตอน inference)
+    model = inception_v3(weights=None, aux_logits=False)
+    # แก้หัวให้เท่ากับจำนวนคลาส
+    in_features = model.fc.in_features
+    model.fc = torch.nn.Linear(in_features, num_classes)
     model.to(device)
+    model.eval()
     return model
