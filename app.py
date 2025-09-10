@@ -110,3 +110,31 @@ if uploaded:
             st.success(f"Predict: **{top_cls}** ({top_p*100:.2f}%)")
 else:
     st.info("อัปโหลดภาพ MRI เพื่อเริ่มทำนาย")
+
+# ---------------- Dark Theme (เพิ่มได้เลย ไม่ไปแก้โค้ดเดิม) ----------------
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-color: #0B1220;
+        color: #E5E7EB;
+    }
+    .stButton>button {
+        background-color: #1F2937;
+        color: #E5E7EB;
+        border-radius: 8px;
+        border: 1px solid #374151;
+    }
+    .stButton>button:hover {
+        background-color: #374151;
+        border-color: #4B5563;
+    }
+    .stTextInput>div>div>input {
+        background-color: #1F2937;
+        color: #E5E7EB;
+        border-radius: 6px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
