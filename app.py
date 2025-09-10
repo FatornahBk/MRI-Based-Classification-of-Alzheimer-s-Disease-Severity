@@ -1,12 +1,12 @@
 import os
 from typing import List, Tuple
+import tempfile, pathlib, requests
 
 import streamlit as st
 from PIL import Image
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
-from huggingface_hub import hf_hub_download
 
 from model_def import build_model
 
@@ -16,35 +16,44 @@ st.title("🧠 MRI-Based Classification of Alzheimer's Disease Severity (Incepti
 
 # ---------------- Config ----------------
 DEVICE = "cpu"
-IMAGE_SIZE = 299                     # Inception v3 ใช้ 299x299
+IMAGE_SIZE = 299
 CLASSES_FILE = "classes.txt"
 
-# ตั้งค่าจาก Secrets (แก้ใน Streamlit Cloud > Settings > Secrets)
-HF_REPO_ID  = st.secrets.get("HF_REPO_ID",  "FatornahBk/MRI-Based-Classification-of-Alzheimer-s-Disease-Severity.git")
-HF_FILENAME = st.secrets.get("HF_FILENAME", "inception_v3_checkpoint_fold0.pt")
+# Secret: direct URL to .pt file (จาก GitHub Releases)
+MODEL_URL = st.secrets.get("MODEL_URL", None)
+
+def _download_from_url(url: str) -> str:
+    resp = requests.get(url, stream=True, timeout=60)
+    resp.raise_for_status()
+    fd, tmp_path = tempfile.mkstemp(suffix=pathlib.Path(url).suffix or ".pt")
+    with os.fdopen(fd, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+    return tmp_path
 
 @st.cache_resource(show_spinner=True)
 def load_model_and_classes():
-    # โหลดคลาส
+    # โหลด classes
     with open(CLASSES_FILE, "r", encoding="utf-8") as f:
         classes = [ln.strip() for ln in f if ln.strip()]
     num_classes = len(classes)
 
-    # ดาวน์โหลด checkpoint จาก HF (cache อัตโนมัติที่เซิร์ฟเวอร์)
-    weights_path = hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME)
+    if not MODEL_URL:
+        st.error("❌ กรุณาตั้งค่า Secrets: MODEL_URL = <ลิงก์ release asset>")
+        st.stop()
+    weights_path = _download_from_url(MODEL_URL)
 
+    # สร้างโมเดลและโหลดน้ำหนัก
     model = build_model(num_classes=num_classes, device=DEVICE)
-
-    # รองรับทั้ง plain state_dict และ checkpoint dict + ป้องกันปัญหา torch 2.6 (weights_only=True)
     try:
-        sd = torch.load(weights_path, map_location=DEVICE)  # อาจเป็น weights_only=True ตามดีฟอลต์
+        sd = torch.load(weights_path, map_location=DEVICE)
     except Exception:
         sd = torch.load(weights_path, map_location=DEVICE, weights_only=False)
 
     if isinstance(sd, dict) and "state_dict" in sd:
         sd = sd["state_dict"]
 
-    # ลอก prefix ที่มาจาก lightning/ddp ออก
     fixed = {}
     for k, v in sd.items():
         nk = k
@@ -54,17 +63,14 @@ def load_model_and_classes():
         fixed[nk] = v
 
     missing, unexpected = model.load_state_dict(fixed, strict=False)
-    if missing:  # debug log ในคอนโซล
-        print("Missing keys:", missing)
-    if unexpected:
-        print("Unexpected keys:", unexpected)
+    if missing: print("Missing keys:", missing)
+    if unexpected: print("Unexpected keys:", unexpected)
 
     model.eval()
     return model, classes
 
 @st.cache_resource
 def get_transform():
-    # Inception v3 ปกติใช้ Normalization ตาม ImageNet
     return T.Compose([
         T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         T.ToTensor(),
@@ -73,7 +79,7 @@ def get_transform():
     ])
 
 def predict(img: Image.Image, model: torch.nn.Module, classes: List[str]) -> List[Tuple[str, float]]:
-    x = get_transform()(img.convert("RGB")).unsqueeze(0)  # [1,3,299,299]
+    x = get_transform()(img.convert("RGB")).unsqueeze(0)
     with torch.no_grad():
         logits = model(x.to(DEVICE))
         probs = F.softmax(logits, dim=1).cpu().numpy().flatten()
@@ -92,7 +98,6 @@ if uploaded:
             model, classes = load_model_and_classes()
             results = predict(img, model, classes)
 
-        # เรียงตามที่คุณอยากแสดง (ถ้าอยากเรียงตาม classes.txt ให้คอมเมนต์บล็อกนี้)
         preferred_order = ["Mild Impairment", "Moderate Impairment", "No Impairment", "Very Mild Impairment"]
         rank = {n: i for i, n in enumerate(preferred_order)}
         results_sorted = sorted(results, key=lambda x: rank.get(x[0], 999))
