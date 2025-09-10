@@ -13,7 +13,6 @@ from model_def import build_model
 # ---------------- Page ----------------
 st.set_page_config(page_title="Alzheimer's MRI — Inception v3", layout="centered")
 st.title("🧠 MRI-Based Classification of Alzheimer's Disease Severity (Inception v3)")
-st.caption("Upload → Predict → ดูความน่าจะเป็นทุกคลาส • Deploy บน Streamlit Cloud")
 
 # ---------------- Config ----------------
 DEVICE = "cpu"
@@ -21,7 +20,7 @@ IMAGE_SIZE = 299                     # Inception v3 ใช้ 299x299
 CLASSES_FILE = "classes.txt"
 
 # ตั้งค่าจาก Secrets (แก้ใน Streamlit Cloud > Settings > Secrets)
-HF_REPO_ID  = st.secrets.get("HF_REPO_ID",  "fatornahbk/alz-inception-v3")
+HF_REPO_ID  = st.secrets.get("HF_REPO_ID",  "FatornahBk/MRI-Based-Classification-of-Alzheimer-s-Disease-Severity.git")
 HF_FILENAME = st.secrets.get("HF_FILENAME", "inception_v3_checkpoint_fold0.pt")
 
 @st.cache_resource(show_spinner=True)
